@@ -1,0 +1,51 @@
+{
+  "name": "aegisflow",
+  "version": "1.0.0",
+  "description": "AegisFlow multi-agent CLI orchestrator",
+  "main": "dist/index.js",
+  "bin": {
+    "aegis": "./dist/index.js",
+    "aeigs": "./dist/index.js",
+    "aegisflow": "./dist/index.js"
+  },
+  "files": [
+    "dist",
+    "CHANGELOG.md",
+    "README.md",
+    "aegisflow.config.json.example"
+  ],
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "build": "esbuild src/index.ts --bundle --platform=node --format=cjs --target=node18 --banner:js='#!/usr/bin/env node' --outfile=dist/index.js --external:node-pty",
+    "smoke": "node dist/index.js -h",
+    "release:check": "npm run typecheck && npm run build && npm run smoke && npm pack --dry-run",
+    "prepack": "npm run typecheck && npm run build && npm run smoke",
+    "start": "node dist/index.js",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": [
+    "cli",
+    "agent",
+    "orchestrator",
+    "aegisflow"
+  ],
+  "author": "",
+  "license": "ISC",
+  "engines": {
+    "node": ">=18"
+  },
+  "type": "commonjs",
+  "dependencies": {
+    "@clack/prompts": "^1.1.0",
+    "chalk": "^5.6.2",
+    "cli-spinners": "^3.4.0",
+    "dotenv": "^17.3.1",
+    "node-pty": "^1.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^25.5.0",
+    "esbuild": "^0.25.10",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3"
+  }
+}

@@ -1,0 +1,7 @@
+node_modules/
+dist/
+.aegis/
+*.tgz
+prd-*.md
+# Local runtime config generated during setup
+aegisflow.config.json
