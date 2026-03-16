@@ -2,6 +2,7 @@ import fs from 'fs';
 
 import {
   AegisConfig,
+  AegisConfigFile,
   EngineDetectionStatus,
   EngineSlot,
   ReplyLanguageConfig,
@@ -109,10 +110,10 @@ function normalizeSetup(value: unknown): SetupConfig {
   };
 }
 
-export function readAegisConfigFile(cwd = process.cwd()): Partial<AegisConfig> {
+export function readAegisConfigFile(cwd = process.cwd()): AegisConfigFile {
   const filePath = getAegisConfigPath();
   if (fs.existsSync(filePath)) {
-    return JSON.parse(fs.readFileSync(filePath, 'utf-8')) as Partial<AegisConfig>;
+    return JSON.parse(fs.readFileSync(filePath, 'utf-8')) as AegisConfigFile;
   }
 
   const legacyPath = getLegacyWorkspaceConfigPath(cwd);
@@ -120,12 +121,12 @@ export function readAegisConfigFile(cwd = process.cwd()): Partial<AegisConfig> {
     return {};
   }
 
-  const legacyConfig = JSON.parse(fs.readFileSync(legacyPath, 'utf-8')) as Partial<AegisConfig>;
+  const legacyConfig = JSON.parse(fs.readFileSync(legacyPath, 'utf-8')) as AegisConfigFile;
   writeAegisConfigFile(legacyConfig);
   return legacyConfig;
 }
 
-function writeAegisConfigFile(config: Partial<AegisConfig>): string {
+function writeAegisConfigFile(config: AegisConfigFile): string {
   ensureAegisHomeDir();
   const filePath = getAegisConfigPath();
   fs.writeFileSync(filePath, `${JSON.stringify(config, null, 2)}\n`, 'utf-8');
@@ -133,10 +134,10 @@ function writeAegisConfigFile(config: Partial<AegisConfig>): string {
 }
 
 export function writeAegisConfig(config: AegisConfig): string {
-  return writeAegisConfigFile(config);
+  return writeAegisConfigFile(compactAegisConfig(config));
 }
 
-export function createAegisConfig(fileConfig: Partial<AegisConfig> = {}): AegisConfig {
+export function createAegisConfig(fileConfig: AegisConfigFile = {}): AegisConfig {
   const fallbackOrder =
     (fileConfig.routing?.fallbackOrder || [])
       .map(slot => parseEngineSlot(slot))
@@ -173,6 +174,88 @@ export function createAegisConfig(fileConfig: Partial<AegisConfig> = {}): AegisC
         ...(fileConfig.engines?.gemini || {}),
       },
     },
+  };
+}
+
+function slotListsEqual(left: EngineSlot[] = [], right: EngineSlot[] = []): boolean {
+  return left.length === right.length && left.every((slot, index) => slot === right[index]);
+}
+
+function compactDomainOwners(domainOwners: Record<TaskDomain, EngineSlot>): Partial<Record<TaskDomain, EngineSlot>> {
+  return Object.fromEntries(
+    Object.entries(domainOwners).filter(([domain, owner]) => DEFAULT_DOMAIN_OWNERS[domain as TaskDomain] !== owner),
+  ) as Partial<Record<TaskDomain, EngineSlot>>;
+}
+
+function compactStagePreferences(
+  stagePreferences: Partial<Record<RoutingStagePreferenceKey, EngineSlot[]>>,
+  fallbackOrder: EngineSlot[],
+): Partial<Record<RoutingStagePreferenceKey, EngineSlot[]>> {
+  const compact: Partial<Record<RoutingStagePreferenceKey, EngineSlot[]>> = {};
+  const defaultPreference = stagePreferences.default;
+
+  if (defaultPreference && defaultPreference.length > 0 && !slotListsEqual(defaultPreference, fallbackOrder)) {
+    compact.default = defaultPreference;
+  }
+
+  for (const key of STAGE_PREFERENCE_KEYS) {
+    if (key === 'default') {
+      continue;
+    }
+
+    const preference = stagePreferences[key];
+    if (!preference || preference.length === 0) {
+      continue;
+    }
+
+    const baseline = defaultPreference && defaultPreference.length > 0 ? defaultPreference : fallbackOrder;
+    if (!slotListsEqual(preference, baseline)) {
+      compact[key] = preference;
+    }
+  }
+
+  return compact;
+}
+
+function compactEngines(engines: AegisConfig['engines']): AegisConfigFile['engines'] {
+  const compactEntries = (Object.keys(DEFAULT_ENGINE_CANDIDATES) as EngineSlot[])
+    .map(slot => {
+      const config = engines[slot];
+      if (!config) {
+        return null;
+      }
+
+      const compactConfig = {
+        ...(config.command && !DEFAULT_ENGINE_CANDIDATES[slot].includes(config.command) ? { command: config.command } : {}),
+        ...(config.args && config.args.length > 0 ? { args: config.args } : {}),
+        ...(config.candidates && config.candidates.some(candidate => !DEFAULT_ENGINE_CANDIDATES[slot].includes(candidate))
+          ? { candidates: config.candidates.filter(candidate => !DEFAULT_ENGINE_CANDIDATES[slot].includes(candidate)) }
+          : {}),
+      };
+
+      return Object.keys(compactConfig).length > 0 ? [slot, compactConfig] : null;
+    })
+    .filter(Boolean) as Array<[EngineSlot, { command?: string; args?: string[]; candidates?: string[] }]>;
+
+  return compactEntries.length > 0 ? Object.fromEntries(compactEntries) : undefined;
+}
+
+function compactAegisConfig(config: AegisConfig): AegisConfigFile {
+  const domainOwners = compactDomainOwners(config.routing.domainOwners);
+  const stagePreferences = compactStagePreferences(config.routing.stagePreferences, config.routing.fallbackOrder);
+  const engines = compactEngines(config.engines);
+
+  return {
+    dryRun: config.dryRun,
+    setup: config.setup,
+    language: config.language,
+    routing: {
+      ...(config.routing.designLead ? { designLead: config.routing.designLead } : {}),
+      fallbackOrder: config.routing.fallbackOrder,
+      ...(Object.keys(domainOwners).length > 0 ? { domainOwners } : {}),
+      ...(Object.keys(stagePreferences).length > 0 ? { stagePreferences } : {}),
+    },
+    ...(engines ? { engines } : {}),
   };
 }
 

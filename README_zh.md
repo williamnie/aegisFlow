@@ -33,12 +33,6 @@ npm install -g aegisflow
 aegis
 ```
 
-或者：
-
-```bash
-aeigs
-```
-
 也可以使用这个别名：
 
 ```bash

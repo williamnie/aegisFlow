@@ -5,7 +5,6 @@ import {
   EngineDetectionStatus,
   EngineSlot,
   ReplyLanguageConfig,
-  RoutingStagePreferenceKey,
   SetupMode,
   TaskDomain,
 } from './types';
@@ -14,7 +13,6 @@ import {
   DEFAULT_DOMAIN_OWNERS,
   DEFAULT_REPLY_LANGUAGE,
   readAegisConfigFile,
-  STAGE_PREFERENCE_KEYS,
   writeAegisConfig,
 } from './config';
 import { ALL_ENGINE_SLOTS, detectEngines, ENGINE_LABELS } from './engine-discovery';
@@ -77,12 +75,6 @@ function buildFallbackOrder(
   detection: Record<EngineSlot, EngineDetectionStatus>,
 ): EngineSlot[] {
   return unique([preferred, ...availableSlots(detection), ...ALL_ENGINE_SLOTS]);
-}
-
-function buildStagePreferences(order: EngineSlot[]): Partial<Record<RoutingStagePreferenceKey, EngineSlot[]>> {
-  return Object.fromEntries(STAGE_PREFERENCE_KEYS.map(key => [key, order])) as Partial<
-    Record<RoutingStagePreferenceKey, EngineSlot[]>
-  >;
 }
 
 function pickDomainOwner(
@@ -169,12 +161,14 @@ function renderDetectionSummary(detection: Record<EngineSlot, EngineDetectionSta
 }
 
 function renderSetupSummary(config: AegisConfig, configPath: string): string {
+  const overrideCount = Object.entries(config.routing.domainOwners).filter(
+    ([domain, owner]) => DEFAULT_DOMAIN_OWNERS[domain as TaskDomain] !== owner,
+  ).length;
+
   return [
     `主 Agent：${config.routing.designLead ? ENGINE_LABELS[config.routing.designLead] : '未设置'}`,
     `默认语言：${config.language.label}`,
-    `前端：${ENGINE_LABELS[config.routing.domainOwners.frontend]}`,
-    `后端：${ENGINE_LABELS[config.routing.domainOwners.backend]}`,
-    `架构：${ENGINE_LABELS[config.routing.domainOwners.architecture]}`,
+    `自定义分工：${overrideCount > 0 ? `${overrideCount} 项` : '无'}`,
     `配置文件：${configPath}`,
   ].join('\n');
 }
@@ -239,6 +233,17 @@ async function askPreferredEngine(
   return answer as EngineSlot;
 }
 
+async function askCustomizeDomainRouting(initialValue: boolean): Promise<boolean> {
+  const answer = cancelIfNeeded(
+    await p.confirm({
+      message: '是否需要单独指定前端/后端等领域的默认 Agent？',
+      initialValue,
+    }),
+  );
+
+  return answer === true;
+}
+
 async function askCustomDomainOwners(
   detection: Record<EngineSlot, EngineDetectionStatus>,
   currentOwners: Record<TaskDomain, EngineSlot>,
@@ -277,13 +282,17 @@ export async function ensureAegisInitialized(options: { cwd?: string; force?: bo
   const language = await askLanguage(baseConfig.language);
   let designLead = pickPreferredLead(detection, baseConfig.routing.designLead);
   let domainOwners = buildRecommendedDomainOwners(detection, designLead, baseConfig.routing.domainOwners);
+  const hadStoredDomainOverrides = Boolean(rawConfig.routing?.domainOwners && Object.keys(rawConfig.routing.domainOwners).length > 0);
 
   if (mode === 'custom') {
     designLead = await askPreferredEngine('主 Agent 默认由谁负责？', detection, designLead);
-    domainOwners = await askCustomDomainOwners(
-      detection,
-      buildRecommendedDomainOwners(detection, designLead, domainOwners),
-    );
+    const shouldCustomizeDomainRouting = await askCustomizeDomainRouting(hadStoredDomainOverrides);
+    if (shouldCustomizeDomainRouting) {
+      domainOwners = await askCustomDomainOwners(
+        detection,
+        buildRecommendedDomainOwners(detection, designLead, domainOwners),
+      );
+    }
   }
 
   const fallbackOrder = buildFallbackOrder(designLead, detection);
@@ -301,7 +310,7 @@ export async function ensureAegisInitialized(options: { cwd?: string; force?: bo
       designLead,
       fallbackOrder,
       domainOwners,
-      stagePreferences: buildStagePreferences(fallbackOrder),
+      stagePreferences: {},
     },
     engines: buildEngineConfig(baseConfig, detection),
   };

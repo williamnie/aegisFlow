@@ -33,12 +33,6 @@ After installation, you can start it with:
 aegis
 ```
 
-Or:
-
-```bash
-aeigs
-```
-
 An alias is also available:
 
 ```bash

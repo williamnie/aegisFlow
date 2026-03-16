@@ -330,6 +330,19 @@ export interface SetupConfig {
   detectedEngines: Partial<Record<EngineSlot, EngineDetectionStatus>>;
 }
 
+export interface AegisConfigFile {
+  dryRun?: boolean;
+  setup?: Partial<SetupConfig>;
+  language?: Partial<ReplyLanguageConfig>;
+  routing?: {
+    designLead?: EngineSlot;
+    fallbackOrder?: EngineSlot[];
+    domainOwners?: Partial<Record<TaskDomain, EngineSlot>>;
+    stagePreferences?: Partial<Record<RoutingStagePreferenceKey, EngineSlot[]>>;
+  };
+  engines?: Partial<Record<EngineSlot, EngineCommandConfig>>;
+}
+
 export interface AegisConfig {
   dryRun: boolean;
   setup: SetupConfig;

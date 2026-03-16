@@ -28,41 +28,6 @@
   },
   "routing": {
     "designLead": "codex",
-    "fallbackOrder": ["codex", "claude", "gemini"],
-    "stagePreferences": {
-      "default": ["codex", "claude", "gemini"],
-      "idea": ["codex", "claude", "gemini"],
-      "prd": ["codex", "claude", "gemini"],
-      "techDesign": ["codex", "claude", "gemini"],
-      "roundtablePlan": ["codex", "claude", "gemini"],
-      "roundtableMinutes": ["codex", "claude", "gemini"],
-      "finalDesign": ["codex", "claude", "gemini"],
-      "taskPlan": ["codex", "claude", "gemini"],
-      "integrationReview": ["codex", "claude", "gemini"]
-    },
-    "domainOwners": {
-      "frontend": "gemini",
-      "backend": "codex",
-      "architecture": "claude",
-      "integration": "claude",
-      "testing": "codex",
-      "data": "codex",
-      "docs": "claude",
-      "ops": "codex"
-    }
-  },
-  "engines": {
-    "claude": {
-      "command": "claude",
-      "args": []
-    },
-    "codex": {
-      "command": "codex",
-      "args": []
-    },
-    "gemini": {
-      "command": "gemini",
-      "args": []
-    }
+    "fallbackOrder": ["codex", "claude", "gemini"]
   }
 }
