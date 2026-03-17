@@ -23,14 +23,24 @@ const LEGACY_SESSION_ROOT_ARTIFACTS = new Set([
   'tech-design-review-packet.md',
 ]);
 
+export interface SessionSummary {
+  sessionId: string;
+  sessionDir: string;
+  workspace: string;
+  projectLabel: string;
+  createdAt: string;
+  currentStage?: string;
+  currentStatus?: 'pending' | 'running' | 'completed' | 'failed';
+}
+
 export class ArtifactStore {
   private readonly workspaceDir: string;
   private readonly sessionDir: string;
 
   constructor(sessionId?: string) {
     this.workspaceDir = process.cwd();
-    const id = sessionId || new Date().toISOString().replace(/[:.]/g, '-');
     const baseDir = getSessionRootDir();
+    const id = sessionId || ArtifactStore.buildDefaultSessionId(this.workspaceDir, baseDir);
     this.sessionDir = path.join(baseDir, id);
     const legacySessionDir = path.join(this.workspaceDir, '.aegis', 'sessions', id);
 
@@ -53,6 +63,26 @@ export class ArtifactStore {
         stages: {},
       } satisfies SessionState);
     }
+  }
+
+  public static buildDefaultSessionId(workspaceDir = process.cwd(), baseDir = getSessionRootDir()): string {
+    const timestamp = nowIso().replace(/[:.]/g, '-');
+    const workspaceSlug = this.buildWorkspaceSlug(workspaceDir);
+    const baseId = workspaceSlug ? `${workspaceSlug}-${timestamp}` : timestamp;
+
+    return this.ensureUniqueSessionId(baseId, baseDir);
+  }
+
+  public static listSessions(baseDir = getSessionRootDir()): SessionSummary[] {
+    if (!fs.existsSync(baseDir)) {
+      return [];
+    }
+
+    return fs.readdirSync(baseDir)
+      .map(entry => path.join(baseDir, entry))
+      .filter(sessionDir => fs.existsSync(sessionDir) && fs.statSync(sessionDir).isDirectory())
+      .map(sessionDir => this.readSessionSummary(sessionDir))
+      .sort((left, right) => this.toTimestamp(right.createdAt) - this.toTimestamp(left.createdAt));
   }
 
   public getSessionId(): string {
@@ -98,6 +128,40 @@ export class ArtifactStore {
     this.saveArtifact(filename, JSON.stringify(content, null, 2));
   }
 
+  public deleteArtifact(filename: string): boolean {
+    const candidates = this.getArtifactPathCandidates(filename);
+    let deleted = false;
+
+    for (const filePath of candidates) {
+      if (!fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) {
+        continue;
+      }
+
+      fs.unlinkSync(filePath);
+      this.pruneEmptyDirs(path.dirname(filePath));
+      deleted = true;
+    }
+
+    return deleted;
+  }
+
+  public deleteArtifactsByPrefix(prefix: string): string[] {
+    const normalizedPrefix = this.normalizeFilename(prefix);
+    const deleted: string[] = [];
+
+    for (const artifact of this.listArtifacts()) {
+      if (!artifact.startsWith(normalizedPrefix)) {
+        continue;
+      }
+
+      if (this.deleteArtifact(artifact)) {
+        deleted.push(artifact);
+      }
+    }
+
+    return deleted;
+  }
+
   public readArtifact(filename: string): string | null {
     const filePath = this.resolveArtifactPath(filename, 'read');
     if (!fs.existsSync(filePath)) {
@@ -126,6 +190,33 @@ export class ArtifactStore {
     };
 
     this.saveJson('session-state.json', state);
+  }
+
+  public clearStages(stages: string[]): void {
+    if (stages.length === 0) {
+      return;
+    }
+
+    const state = this.readJson<SessionState>('session-state.json');
+    if (!state) {
+      return;
+    }
+
+    let changed = false;
+    for (const stage of stages) {
+      if (state.stages[stage]) {
+        delete state.stages[stage];
+        changed = true;
+      }
+      if (state.currentStage === stage) {
+        delete state.currentStage;
+        changed = true;
+      }
+    }
+
+    if (changed) {
+      this.saveJson('session-state.json', state);
+    }
   }
 
   public listArtifacts(): string[] {
@@ -177,6 +268,14 @@ export class ArtifactStore {
     return preferredPath;
   }
 
+  private getArtifactPathCandidates(filename: string): string[] {
+    const normalized = this.normalizeFilename(filename);
+    return uniquePaths([
+      this.getPreferredArtifactPath(normalized),
+      this.getLegacyArtifactPath(normalized),
+    ]);
+  }
+
   private getPreferredArtifactPath(filename: string): string {
     const normalized = this.normalizeFilename(filename);
 
@@ -204,6 +303,25 @@ export class ArtifactStore {
     return filename.replace(/\\/g, '/');
   }
 
+  private pruneEmptyDirs(dir: string): void {
+    const workspaceBoundary = path.resolve(this.workspaceDir);
+    const sessionBoundary = path.resolve(this.sessionDir);
+    let current = path.resolve(dir);
+
+    while (current !== workspaceBoundary && current !== sessionBoundary) {
+      if (!fs.existsSync(current) || !fs.statSync(current).isDirectory()) {
+        break;
+      }
+
+      if (fs.readdirSync(current).length > 0) {
+        break;
+      }
+
+      fs.rmdirSync(current);
+      current = path.dirname(current);
+    }
+  }
+
   private isWorkspaceDocument(filename: string): boolean {
     return Object.prototype.hasOwnProperty.call(WORKSPACE_DOC_NAME_MAP, filename);
   }
@@ -215,4 +333,77 @@ export class ArtifactStore {
 
     return WORKSPACE_DOC_NAME_MAP[filename] || path.basename(filename);
   }
+
+  private static ensureUniqueSessionId(baseId: string, baseDir: string): string {
+    if (!fs.existsSync(path.join(baseDir, baseId))) {
+      return baseId;
+    }
+
+    let suffix = 2;
+    let candidate = `${baseId}-${suffix}`;
+    while (fs.existsSync(path.join(baseDir, candidate))) {
+      suffix += 1;
+      candidate = `${baseId}-${suffix}`;
+    }
+
+    return candidate;
+  }
+
+  private static readSessionSummary(sessionDir: string): SessionSummary {
+    const sessionId = path.basename(sessionDir);
+    const statePath = path.join(sessionDir, 'archive', 'session-state.json');
+    const state = readJsonFile<SessionState>(statePath);
+    const stat = fs.statSync(sessionDir);
+    const currentStage = state?.currentStage;
+    const currentStatus = currentStage ? state?.stages[currentStage]?.status : undefined;
+    const workspace = state?.workspace || '';
+    const createdAt = state?.createdAt || stat.mtime.toISOString();
+
+    return {
+      sessionId,
+      sessionDir,
+      workspace,
+      projectLabel: workspace ? this.buildProjectLabel(workspace) : sessionId,
+      createdAt,
+      ...(currentStage ? { currentStage } : {}),
+      ...(currentStatus ? { currentStatus } : {}),
+    };
+  }
+
+  private static buildWorkspaceSlug(workspaceDir: string): string {
+    const segments = this.getWorkspaceSegments(workspaceDir);
+    const slug = segments
+      .map(segment => this.slugifySegment(segment))
+      .filter(Boolean)
+      .join('-');
+
+    return slug || 'session';
+  }
+
+  private static buildProjectLabel(workspaceDir: string): string {
+    const segments = this.getWorkspaceSegments(workspaceDir);
+    return segments.length > 0 ? segments.join('/') : workspaceDir;
+  }
+
+  private static getWorkspaceSegments(workspaceDir: string): string[] {
+    const normalized = path.resolve(workspaceDir).split(path.sep).filter(Boolean);
+    return normalized.slice(-2);
+  }
+
+  private static slugifySegment(value: string): string {
+    return value
+      .replace(/([a-z0-9])([A-Z])/g, '$1-$2')
+      .toLowerCase()
+      .replace(/[^\p{Letter}\p{Number}]+/gu, '-')
+      .replace(/^-+|-+$/g, '');
+  }
+
+  private static toTimestamp(value: string): number {
+    const parsed = Date.parse(value);
+    return Number.isNaN(parsed) ? 0 : parsed;
+  }
+}
+
+function uniquePaths(paths: string[]): string[] {
+  return [...new Set(paths)];
 }

@@ -43,8 +43,10 @@ aegisflow
 
 ```bash
 aegis
+aegis --sessions
 aegis --setup
 aegis <session-id>
+aegis <session-id> --from <stage>
 aegis -h
 aegis --help
 aegis -v
@@ -54,11 +56,37 @@ aegisflow
 ```
 
 - `aegis`: start a new run in the current directory.
+- `aegis --sessions`: list saved sessions, including the project path and last known stage.
 - `aegis <session-id>`: resume or continue a specific session.
+- `aegis <session-id> --from <stage>`: restart from a specific stage, clearing artifacts for that stage and everything after it before rerunning.
 - `aegis --setup`: rerun interactive setup and engine detection.
 - `aegis -h` / `aegis --help`: show CLI help and output locations.
 - `aegis -v` / `aegis --version`: print the installed version.
 - `aeigs` and `aegisflow`: aliases of `aegis`.
+
+Common `--from` values:
+
+- `stage0` / `idea`
+- `stage0.5` / `requirement-gate`
+- `stage1` / `prd`
+- `stage2` / `tech-design`
+- `stage3` / `reviews`
+- `stage4` / `roundtable`
+- `stage4.5` / `strategy`
+- `stage5` / `task-plan`
+- `stage6` / `execution`
+- `stage7` / `integration`
+
+Examples:
+
+```bash
+aegis --sessions
+aegis demo-session --from stage6
+aegis demo-session --from execution
+aegis demo-session --from strategy
+```
+
+Default session IDs now use the last two workspace directory names plus a timestamp, for example `xiaobei-aegis-flow-2026-03-17T03-29-28-379Z`.
 
 ## Workflow
 

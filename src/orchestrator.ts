@@ -107,6 +107,182 @@ const IDEA_FOLLOW_UP_INTENTS = new Set([
   'other',
 ] as const);
 
+export type PipelineStartStage =
+  | 'stage0'
+  | 'stage0-requirement-gate'
+  | 'stage1'
+  | 'stage2'
+  | 'stage3'
+  | 'stage4'
+  | 'stage4-post-design-decision'
+  | 'stage5'
+  | 'stage6'
+  | 'stage7';
+
+interface OrchestratorOptions {
+  startStage?: PipelineStartStage;
+}
+
+interface PipelineStageDefinition {
+  id: PipelineStartStage;
+  label: string;
+  description: string;
+  aliases: string[];
+  requiredArtifacts: string[];
+  ownedArtifacts: string[];
+  ownedPrefixes: string[];
+  stageStateKeys: string[];
+}
+
+const PIPELINE_START_STAGES: PipelineStageDefinition[] = [
+  {
+    id: 'stage0',
+    label: 'Stage 0',
+    description: 'idea intake and idea brief generation',
+    aliases: ['stage0', '0', 'idea', 'idea-intake', 'stage0-idea'],
+    requiredArtifacts: [],
+    ownedArtifacts: [
+      'idea-intake.json',
+      'idea-intake.md',
+      'idea-brief.json',
+      'idea-brief.md',
+    ],
+    ownedPrefixes: [],
+    stageStateKeys: ['stage0-idea'],
+  },
+  {
+    id: 'stage0-requirement-gate',
+    label: 'Stage 0.5',
+    description: 'requirement gate, summary, and validation',
+    aliases: ['stage0.5', '0.5', 'requirement-gate', 'req-gate', 'stage0-requirement-gate'],
+    requiredArtifacts: ['idea-brief.json'],
+    ownedArtifacts: [
+      'requirement-assessment.json',
+      'requirement-assessment.md',
+      'requirement-summary.json',
+      'requirement-summary.md',
+      'requirement-validation-summary.json',
+      'requirement-validation.md',
+      'requirement-pack.json',
+      'requirement-pack.md',
+      'requirement-clarifications.json',
+      'requirement-clarifications.md',
+      'requirement-check-claude.json',
+      'requirement-check-claude.md',
+      'requirement-check-codex.json',
+      'requirement-check-codex.md',
+      'requirement-check-gemini.json',
+      'requirement-check-gemini.md',
+    ],
+    ownedPrefixes: [],
+    stageStateKeys: ['stage0-requirement-gate'],
+  },
+  {
+    id: 'stage1',
+    label: 'Stage 1',
+    description: 'PRD drafting and approval',
+    aliases: ['stage1', '1', 'prd'],
+    requiredArtifacts: ['idea-brief.json', 'requirement-pack.md'],
+    ownedArtifacts: ['prd-draft.md', 'prd-final.md'],
+    ownedPrefixes: [],
+    stageStateKeys: ['stage1-prd'],
+  },
+  {
+    id: 'stage2',
+    label: 'Stage 2',
+    description: 'technical design drafting',
+    aliases: ['stage2', '2', 'design', 'tech-design', 'technical-design'],
+    requiredArtifacts: ['idea-brief.json', 'prd-final.md'],
+    ownedArtifacts: ['tech-design-draft.md', 'tech-design-lead.json'],
+    ownedPrefixes: [],
+    stageStateKeys: ['stage2-tech-design'],
+  },
+  {
+    id: 'stage3',
+    label: 'Stage 3',
+    description: 'independent reviews and consensus summary',
+    aliases: ['stage3', '3', 'review', 'reviews'],
+    requiredArtifacts: ['prd-final.md', 'tech-design-draft.md', 'tech-design-lead.json'],
+    ownedArtifacts: [
+      'review-claude.json',
+      'review-claude.md',
+      'review-codex.json',
+      'review-codex.md',
+      'review-gemini.json',
+      'review-gemini.md',
+      'consensus-report.json',
+      'consensus-report.md',
+    ],
+    ownedPrefixes: [],
+    stageStateKeys: ['stage3-reviews'],
+  },
+  {
+    id: 'stage4',
+    label: 'Stage 4',
+    description: 'roundtable, arbitration, and final design',
+    aliases: ['stage4', '4', 'roundtable'],
+    requiredArtifacts: ['tech-design-draft.md', 'tech-design-lead.json'],
+    ownedArtifacts: [
+      'roundtable-plan.json',
+      'roundtable-turns.json',
+      'roundtable-transcript.md',
+      'roundtable-minutes.json',
+      'roundtable-minutes.md',
+      'tech-design-review-packet.md',
+      'decision-log.json',
+      'decision-log.md',
+      'manual-review-handoff.md',
+      'tech-design-final.md',
+    ],
+    ownedPrefixes: [],
+    stageStateKeys: ['stage4-roundtable'],
+  },
+  {
+    id: 'stage4-post-design-decision',
+    label: 'Post-Design',
+    description: 'development strategy decision',
+    aliases: ['stage4.5', '4.5', 'post-design', 'strategy', 'stage4-post-design-decision'],
+    requiredArtifacts: ['tech-design-final.md'],
+    ownedArtifacts: ['development-strategy.json', 'development-strategy.md'],
+    ownedPrefixes: [],
+    stageStateKeys: ['stage4-post-design-decision'],
+  },
+  {
+    id: 'stage5',
+    label: 'Stage 5',
+    description: 'task planning',
+    aliases: ['stage5', '5', 'task-plan', 'taskplan', 'planning'],
+    requiredArtifacts: ['tech-design-final.md', 'development-strategy.json'],
+    ownedArtifacts: ['task-graph.json', 'implementation-plan.md', 'task-plan-fallback-reason.md'],
+    ownedPrefixes: [],
+    stageStateKeys: ['stage5-task-plan'],
+  },
+  {
+    id: 'stage6',
+    label: 'Stage 6',
+    description: 'task execution',
+    aliases: ['stage6', '6', 'execution', 'implement', 'implementation'],
+    requiredArtifacts: ['tech-design-final.md', 'development-strategy.json', 'task-graph.json'],
+    ownedArtifacts: [],
+    ownedPrefixes: ['task-runs/'],
+    stageStateKeys: ['stage6-execution'],
+  },
+  {
+    id: 'stage7',
+    label: 'Stage 7',
+    description: 'integration review and final handoff',
+    aliases: ['stage7', '7', 'integration', 'handoff'],
+    requiredArtifacts: ['development-strategy.json', 'task-graph.json'],
+    ownedArtifacts: ['integration-review.json', 'integration-review.md', 'delivery-summary.md', 'final-handoff.md'],
+    ownedPrefixes: [],
+    stageStateKeys: ['stage7-integration'],
+  },
+];
+
+function normalizeStartStageToken(value: string): string {
+  return value.trim().toLowerCase().replace(/[_\s]+/g, '-');
+}
+
 export class Orchestrator {
   private readonly store: ArtifactStore;
   private readonly config: AegisConfig;
@@ -117,10 +293,12 @@ export class Orchestrator {
   private readonly interactiveAvailability = {} as Record<EngineSlot, CapabilityStatus>;
   private readonly unhealthySlots = new Set<EngineSlot>();
   private readonly interactiveDowngradeNotified = new Set<EngineSlot>();
+  private readonly startStage?: PipelineStartStage;
 
-  constructor(sessionId?: string) {
+  constructor(sessionId?: string, options: OrchestratorOptions = {}) {
     this.store = new ArtifactStore(sessionId);
     this.config = loadAegisConfig();
+    this.startStage = options.startStage;
     this.adapters = {
       claude: new ProcessCLIAdapter(
         'claude',
@@ -147,36 +325,224 @@ export class Orchestrator {
     this.initialSnapshot = captureWorkspaceSnapshot(process.cwd(), this.startedAt);
   }
 
+  public static parseStartStage(value: string): PipelineStartStage {
+    const normalized = normalizeStartStageToken(value);
+    const match = PIPELINE_START_STAGES.find(stage => stage.aliases.includes(normalized));
+
+    if (!match) {
+      throw new Error(
+        `Unknown stage "${value}". Valid values: ${PIPELINE_START_STAGES.map(stage => stage.aliases[0]).join(', ')}`,
+      );
+    }
+
+    return match.id;
+  }
+
+  public static getStartStageHelpLines(): string[] {
+    return PIPELINE_START_STAGES.map(stage => {
+      const aliases = stage.aliases.slice(1, 3).join(', ');
+      return `  ${stage.aliases[0]}${aliases ? ` (${aliases})` : ''}: ${stage.description}`;
+    });
+  }
+
   async run() {
     await ChatUI.startSession(`AegisFlow Started | Session: ${this.store.getSessionId()}`);
     await this.initializeEnvironment();
 
-    await this.stage0Idea();
-    await this.stage0RequirementGate();
-    await this.stage1PRD();
-    await this.stage2TechDesign();
-    const reviews = await this.stage3Reviews();
-    const roundtableOutcome = await this.stage4Roundtable(reviews);
-    if (roundtableOutcome.pausedForManualReview) {
-      await ChatUI.endSession(
-        `Paused for manual review. PRD/design outputs stay in ${this.store.getWorkspaceDir()} and the session archive is saved in ${this.store.getSessionDir()}`,
-      );
-      return;
+    const startStage = this.startStage || 'stage0';
+    if (this.startStage) {
+      this.prepareResumeFromStage(this.startStage);
     }
-    const developmentStrategy = await this.stagePostDesignDecision();
+
+    const startIndex = this.getStartStageIndex(startStage);
+
+    if (this.shouldRunStage(startIndex, 'stage0')) {
+      await this.stage0Idea();
+    }
+    if (this.shouldRunStage(startIndex, 'stage0-requirement-gate')) {
+      await this.stage0RequirementGate();
+    }
+    if (this.shouldRunStage(startIndex, 'stage1')) {
+      await this.stage1PRD();
+    }
+    if (this.shouldRunStage(startIndex, 'stage2')) {
+      await this.stage2TechDesign();
+    }
+
+    let reviews: StructuredReview[] = [];
+    if (this.shouldRunStage(startIndex, 'stage3')) {
+      reviews = await this.stage3Reviews();
+    } else if (this.shouldRunStage(startIndex, 'stage4')) {
+      reviews = this.requireExistingReviewsForRoundtable();
+    }
+
+    if (this.shouldRunStage(startIndex, 'stage4')) {
+      const roundtableOutcome = await this.stage4Roundtable(reviews);
+      if (roundtableOutcome.pausedForManualReview) {
+        await ChatUI.endSession(
+          `Paused for manual review. PRD/design outputs stay in ${this.store.getWorkspaceDir()} and the session archive is saved in ${this.store.getSessionDir()}`,
+        );
+        return;
+      }
+    }
+
+    let developmentStrategy: DevelopmentStrategy;
+    if (this.shouldRunStage(startIndex, 'stage4-post-design-decision')) {
+      developmentStrategy = await this.stagePostDesignDecision();
+    } else {
+      developmentStrategy = this.mustReadDevelopmentStrategyForExecution(startStage);
+    }
+
     if (developmentStrategy.action === 'stop_after_design') {
       await ChatUI.endSession(
         `Technical design completed. Development was not started. PRD/design outputs stay in ${this.store.getWorkspaceDir()} and the session archive is saved in ${this.store.getSessionDir()}`,
       );
       return;
     }
-    const taskGraph = await this.stage5TaskPlan(developmentStrategy);
-    await this.stage6Execution(taskGraph, developmentStrategy);
-    await this.stage7Integration(taskGraph, developmentStrategy);
+
+    let taskGraph: TaskGraph;
+    if (this.shouldRunStage(startIndex, 'stage5')) {
+      taskGraph = await this.stage5TaskPlan(developmentStrategy);
+    } else {
+      taskGraph = this.mustReadJson<TaskGraph>('task-graph.json');
+    }
+
+    if (this.shouldRunStage(startIndex, 'stage6')) {
+      await this.stage6Execution(taskGraph, developmentStrategy);
+    }
+    if (this.shouldRunStage(startIndex, 'stage7')) {
+      await this.stage7Integration(taskGraph, developmentStrategy);
+    }
 
     await ChatUI.endSession(
       `All stages completed. PRD/design outputs stay in ${this.store.getWorkspaceDir()} and the session archive is saved in ${this.store.getSessionDir()}`,
     );
+  }
+
+  private prepareResumeFromStage(startStage: PipelineStartStage) {
+    this.validateResumeFromStage(startStage);
+    const invalidation = this.invalidateFromStage(startStage);
+    const stage = this.getStageDefinition(startStage);
+
+    ChatUI.info(
+      'Resume From Stage',
+      [
+        `起点：${stage.label} (${stage.aliases[0]})`,
+        `说明：${stage.description}`,
+        `已清理产物：${invalidation.deletedArtifacts}`,
+        `已清理前缀：${invalidation.deletedPrefixes}`,
+        `已重置阶段状态：${invalidation.clearedStageStates}`,
+      ].join('\n'),
+    );
+  }
+
+  private validateResumeFromStage(startStage: PipelineStartStage) {
+    const stage = this.getStageDefinition(startStage);
+    const missingArtifacts = stage.requiredArtifacts.filter(artifact => !this.store.exists(artifact));
+
+    if (missingArtifacts.length > 0) {
+      throw new Error(
+        [
+          `Cannot resume from ${stage.aliases[0]}. Missing required artifacts:`,
+          ...missingArtifacts.map(artifact => `- ${artifact}`),
+          `Try rerunning from ${this.previousStageAlias(startStage)} instead.`,
+        ].join('\n'),
+      );
+    }
+
+    if (startStage === 'stage4' && this.loadExistingReviews().length === 0) {
+      throw new Error(`Cannot resume from ${stage.aliases[0]}. No saved review artifacts were found. Try rerunning from stage3 instead.`);
+    }
+
+    if (['stage5', 'stage6', 'stage7'].includes(startStage)) {
+      this.mustReadDevelopmentStrategyForExecution(startStage);
+    }
+  }
+
+  private invalidateFromStage(startStage: PipelineStartStage): {
+    deletedArtifacts: number;
+    deletedPrefixes: number;
+    clearedStageStates: number;
+  } {
+    const startIndex = this.getStartStageIndex(startStage);
+    const stageDefinitions = PIPELINE_START_STAGES.slice(startIndex);
+    const deletedArtifacts = new Set<string>();
+    let deletedPrefixEntries = 0;
+
+    for (const stage of stageDefinitions) {
+      for (const artifact of stage.ownedArtifacts) {
+        if (this.store.deleteArtifact(artifact)) {
+          deletedArtifacts.add(artifact);
+        }
+      }
+
+      for (const prefix of stage.ownedPrefixes) {
+        const removed = this.store.deleteArtifactsByPrefix(prefix);
+        deletedPrefixEntries += removed.length;
+        for (const artifact of removed) {
+          deletedArtifacts.add(artifact);
+        }
+      }
+    }
+
+    if (this.getStartStageIndex(startStage) < this.getStartStageIndex('stage4') && this.store.deleteArtifact('manual-review-feedback.md')) {
+      deletedArtifacts.add('manual-review-feedback.md');
+    }
+
+    const stageStates = unique(stageDefinitions.flatMap(stage => stage.stageStateKeys));
+    this.store.clearStages(stageStates);
+
+    return {
+      deletedArtifacts: deletedArtifacts.size,
+      deletedPrefixes: deletedPrefixEntries,
+      clearedStageStates: stageStates.length,
+    };
+  }
+
+  private getStageDefinition(stageId: PipelineStartStage): PipelineStageDefinition {
+    const stage = PIPELINE_START_STAGES.find(item => item.id === stageId);
+    if (!stage) {
+      throw new Error(`Unknown pipeline stage: ${stageId}`);
+    }
+    return stage;
+  }
+
+  private getStartStageIndex(stageId: PipelineStartStage): number {
+    const index = PIPELINE_START_STAGES.findIndex(stage => stage.id === stageId);
+    if (index === -1) {
+      throw new Error(`Unknown pipeline stage index: ${stageId}`);
+    }
+    return index;
+  }
+
+  private shouldRunStage(startIndex: number, targetStage: PipelineStartStage): boolean {
+    return startIndex <= this.getStartStageIndex(targetStage);
+  }
+
+  private previousStageAlias(stageId: PipelineStartStage): string {
+    const index = this.getStartStageIndex(stageId);
+    if (index <= 0) {
+      return PIPELINE_START_STAGES[0].aliases[0];
+    }
+    return PIPELINE_START_STAGES[index - 1].aliases[0];
+  }
+
+  private requireExistingReviewsForRoundtable(): StructuredReview[] {
+    const reviews = this.loadExistingReviews();
+    if (reviews.length === 0) {
+      throw new Error('No saved reviews were found for the roundtable stage. Re-run from stage3 first.');
+    }
+    return reviews;
+  }
+
+  private mustReadDevelopmentStrategyForExecution(startStage: PipelineStartStage): DevelopmentStrategy {
+    const strategy = this.mustReadJson<DevelopmentStrategy>('development-strategy.json');
+    if (strategy.action !== 'start_development') {
+      throw new Error(
+        `Cannot resume from ${this.getStageDefinition(startStage).aliases[0]} because the saved strategy stops after design. Re-run from strategy instead.`,
+      );
+    }
+    return strategy;
   }
 
   private async initializeEnvironment() {

@@ -43,8 +43,10 @@ aegisflow
 
 ```bash
 aegis
+aegis --sessions
 aegis --setup
 aegis <session-id>
+aegis <session-id> --from <stage>
 aegis -h
 aegis --help
 aegis -v
@@ -54,11 +56,37 @@ aegisflow
 ```
 
 - `aegis`：在当前目录启动一次新的编排流程。
+- `aegis --sessions`：列出历史会话，并显示对应项目路径和最近阶段。
 - `aegis <session-id>`：恢复或继续某个指定会话。
+- `aegis <session-id> --from <stage>`：从指定阶段重新开始，并在重跑前清理该阶段及其后续阶段的产物。
 - `aegis --setup`：重新执行初始化和引擎检测。
 - `aegis -h` / `aegis --help`：查看命令说明、流程概览和产物位置。
 - `aegis -v` / `aegis --version`：查看当前安装版本。
 - `aeigs` 和 `aegisflow`：都是 `aegis` 的别名。
+
+常用 `--from` 取值：
+
+- `stage0` / `idea`
+- `stage0.5` / `requirement-gate`
+- `stage1` / `prd`
+- `stage2` / `tech-design`
+- `stage3` / `reviews`
+- `stage4` / `roundtable`
+- `stage4.5` / `strategy`
+- `stage5` / `task-plan`
+- `stage6` / `execution`
+- `stage7` / `integration`
+
+示例：
+
+```bash
+aegis --sessions
+aegis demo-session --from stage6
+aegis demo-session --from execution
+aegis demo-session --from strategy
+```
+
+默认生成的 `session-id` 现在会带上当前工作目录的最后两级目录名，再拼上时间戳，例如 `xiaobei-aegis-flow-2026-03-17T03-29-28-379Z`。
 
 ## 工作流
 
