@@ -1849,8 +1849,9 @@ export class Orchestrator {
     reviewProgress: Partial<Record<EngineSlot, ReviewProgressState>>,
     announce: (currentAction: string) => void,
   ): Promise<StructuredReview> {
+    const projectLabel = this.inferTargetProjectLabel(command.targetFilePath);
     const prompt = [
-      `You are acting as ${ENGINE_LABELS[slot]} inside AegisFlow.`,
+      `You are acting as ${ENGINE_LABELS[slot]} in a product document review for "${projectLabel}".`,
       `Review the PRD independently from this lens: ${this.describePrdReviewLens(slot)}.`,
       'Treat this as a PRD review, not a technical design review.',
       'Return JSON only.',
@@ -1859,6 +1860,7 @@ export class Orchestrator {
       '- Prefer actionable findings over generic compliments.',
       '- Explicitly call out ambiguity, contradictory statements, unrealistic scope, missing edge cases, or weak acceptance criteria.',
       '- If the PRD is strong enough to proceed, say that clearly in the summary and suggested decision.',
+      `- Review only the supplied PRD for "${projectLabel}". Do not inject AegisFlow-specific product assumptions or workflow terminology unless the PRD explicitly asks for them.`,
       '',
       `PRD file path: ${command.targetFilePath}`,
       '',
@@ -2024,8 +2026,9 @@ export class Orchestrator {
     reviewProgress: Partial<Record<EngineSlot, ReviewProgressState>>,
     announce: (currentAction: string) => void,
   ): Promise<StructuredReview> {
+    const projectLabel = this.inferTargetProjectLabel(command.targetFilePath);
     const prompt = [
-      `You are acting as ${ENGINE_LABELS[slot]} inside AegisFlow.`,
+      `You are acting as ${ENGINE_LABELS[slot]} in an engineering design review for "${projectLabel}".`,
       `Review the technical design independently from this lens: ${this.describeDesignReviewLens(slot)}.`,
       'Treat this as a technical design review, not a PRD review.',
       'Return JSON only.',
@@ -2034,6 +2037,7 @@ export class Orchestrator {
       '- Prefer actionable findings over generic praise.',
       '- Explicitly call out vague interfaces, unrealistic implementation assumptions, missing operational details, weak testability, or unclear migration/rollout plans.',
       '- If the design is strong enough to proceed, say that clearly in the summary and suggested decision.',
+      `- Review only the target system described by the supplied file for "${projectLabel}". Do not inject AegisFlow-specific architecture or workflow concepts unless the document explicitly defines them.`,
       '',
       `Technical design file path: ${command.targetFilePath}`,
       '',
@@ -2143,6 +2147,7 @@ export class Orchestrator {
     const brief = this.mustReadJson<IdeaBrief>('idea-brief.json');
     const prd = this.mustReadArtifact('prd-final.md');
     const leadSlot = this.selectDesignLead(brief);
+    const projectLabel = this.inferTargetProjectLabel();
 
     ChatUI.stage('Stage 2', [
       `技术设计主写：${ENGINE_LABELS[leadSlot]}`,
@@ -2153,10 +2158,12 @@ export class Orchestrator {
     this.announceTechDesignProgress(leadSlot, 'running');
 
     const prompt = [
-      'You are the technical design lead for AegisFlow.',
+      `You are the technical design lead for the user's project "${projectLabel}".`,
       'Write a detailed technical design in markdown.',
-      'The design must include: architecture overview, modules, data flow, adapter strategy, roundtable mechanism, task routing, execution strategy, integration review, risks, alternatives.',
-      'Reference the approved PRD and keep the design grounded in a local CLI orchestrator architecture.',
+      ...this.buildProjectScopeGuardrails(projectLabel),
+      'Reference the approved PRD and stay grounded in the actual product requirements instead of the orchestration workflow used to generate the document.',
+      'Cover the sections that matter for implementation: architecture overview, major modules/components, key runtime flows, interfaces/contracts, state/storage, failure handling, observability, rollout/testing, risks, and alternatives where relevant.',
+      'Prefer product architecture over delivery-process description. Avoid internal workflow terms such as roundtable, task routing, orchestration framework, or integration review unless the approved PRD explicitly requires them.',
       'Return raw markdown only. Do not wrap the answer in triple backticks.',
       'Do not add any explanation before the document.',
       '',
@@ -2255,10 +2262,12 @@ export class Orchestrator {
     );
 
     for (const slot of reviewSlots) {
+      const projectLabel = this.inferTargetProjectLabel();
       const prompt = [
-        `You are acting as ${ENGINE_LABELS[slot]} inside AegisFlow.`,
+        `You are acting as ${ENGINE_LABELS[slot]} in an engineering design review for "${projectLabel}".`,
         `Review the technical design independently from a ${ENGINE_LENSES[slot]} perspective.`,
         'Return JSON only.',
+        `Review only the supplied PRD and draft for "${projectLabel}". Do not inject AegisFlow-specific architecture or workflow concepts unless those documents explicitly require them.`,
         '',
         `Approved PRD:\n${prd}`,
         '',
@@ -2685,6 +2694,7 @@ export class Orchestrator {
 
     this.store.saveJson('roundtable-plan.json', plan);
     const turns: RoundtableTurn[] = [];
+    const projectLabel = this.inferTargetProjectLabel();
 
     if (plan.launchRoundtable && plan.issues.length > 0) {
       for (const issue of plan.issues) {
@@ -2697,20 +2707,22 @@ export class Orchestrator {
             const prompt =
               round === 1
                 ? [
-                  `You are ${ENGINE_LABELS[slot]} in an AegisFlow roundtable.`,
+                  `You are ${ENGINE_LABELS[slot]} in the "${projectLabel}" engineering design roundtable.`,
                   `Lens: ${ENGINE_LENSES[slot]}.`,
                   `Issue: ${issue.question}`,
                   `Why it matters: ${issue.whyItMatters}`,
                   reviewForSlot ? `Your earlier review summary: ${reviewForSlot.summary}` : `You are the design lead for this issue.`,
                   `Available decision options: ${issue.options.map(option => option.label).join(' | ')}`,
                   manualReviewFeedback ? `Human manual review feedback:\n${manualReviewFeedback}` : '',
+                  `Keep your comments scoped to "${projectLabel}". Do not introduce AegisFlow-specific product architecture or workflow terminology unless it is already justified by the PRD/design draft.`,
                   'Respond in plain text with your position, strongest reason, top risk, and preferred option. Keep it under 180 words.',
                 ].join('\n')
                 : [
-                  `You are ${ENGINE_LABELS[slot]} in round 2 of the AegisFlow roundtable.`,
+                  `You are ${ENGINE_LABELS[slot]} in round 2 of the "${projectLabel}" engineering design roundtable.`,
                   `Issue: ${issue.question}`,
                   `Round 1 transcript:\n${priorTurns.map(turn => `${turn.agentLabel}: ${turn.message}`).join('\n\n')}`,
                   manualReviewFeedback ? `Human manual review feedback:\n${manualReviewFeedback}` : '',
+                  `Keep your comments scoped to "${projectLabel}". Do not introduce AegisFlow-specific product architecture or workflow terminology unless it is already justified by the PRD/design draft.`,
                   'Respond with: what you agree with, what still worries you, and your final recommendation. Keep it under 150 words.',
                 ].join('\n');
 
@@ -2780,8 +2792,9 @@ export class Orchestrator {
     let minutes: RoundtableMinutes;
     try {
       const prompt = [
-        'You are summarizing an AegisFlow roundtable.',
+        `You are summarizing the "${projectLabel}" engineering design roundtable.`,
         'Return JSON only with a short summary, 2-4 decision options, recommendations, and unresolved risks.',
+        ...this.buildProjectScopeGuardrails(projectLabel),
         '',
         `Technical design draft:\n${designDraft}`,
         '',
@@ -2956,6 +2969,8 @@ export class Orchestrator {
     const finalPrompt = [
       'You are finalizing the technical design after a human arbitration decision.',
       'Update the original technical design to reflect the selected decision and the roundtable recommendations.',
+      ...this.buildProjectScopeGuardrails(this.inferTargetProjectLabel()),
+      'Keep the final document focused on the target product architecture. Do not preserve delivery-process terms unless they are true requirements of the system being designed.',
       'Return markdown only.',
       'Do not wrap the answer in triple backticks.',
       'Do not add any explanation before the document.',
@@ -4688,8 +4703,9 @@ export class Orchestrator {
     reviews: StructuredReview[],
     revisedPrdPath: string,
   ): Promise<string> {
+    const projectLabel = this.inferTargetProjectLabel(command.targetFilePath);
     const prompt = [
-      'You are the final PRD review reporter for AegisFlow.',
+      `You are the final PRD review reporter for "${projectLabel}".`,
       'Write a user-facing PRD review report in markdown.',
       'Use the reviewer outputs and consensus data to synthesize a concise, high-signal report.',
       'Do not mechanically dump every finding. Merge overlapping points and prioritize the most important issues.',
@@ -4707,6 +4723,7 @@ export class Orchestrator {
       '- Recommended Next Step',
       '- Reviewer Breakdown',
       '- Revised PRD Output',
+      ...this.buildProjectScopeGuardrails(projectLabel),
       '',
       `Original PRD:\n${prdContent}`,
       '',
@@ -4753,6 +4770,7 @@ export class Orchestrator {
     consensus: ConsensusSummary,
     reviews: StructuredReview[],
   ): Promise<string> {
+    const projectLabel = this.inferTargetProjectLabel(command.targetFilePath);
     const prompt = [
       'You are a principal engineer revising an existing technical design based on review feedback.',
       'Rewrite the technical design in markdown.',
@@ -4768,6 +4786,8 @@ export class Orchestrator {
       '- Keep assumptions explicit instead of inventing unsupported commitments.',
       '- Tighten architecture, modules, data flow, failure handling, observability, rollout, risks, and validation strategy where needed.',
       '- If a reviewer requested clarification that still cannot be resolved from the source design, capture it as an assumption, scope note, risk, or explicit open question inside the revised design.',
+      ...this.buildProjectScopeGuardrails(projectLabel),
+      'Do not preserve AegisFlow-specific internal workflow sections unless they are truly part of the target system requirements.',
       '',
       `Original technical design:\n${designContent}`,
       '',
@@ -4815,8 +4835,9 @@ export class Orchestrator {
     reviews: StructuredReview[],
     revisedDesignPath: string,
   ): Promise<string> {
+    const projectLabel = this.inferTargetProjectLabel(command.targetFilePath);
     const prompt = [
-      'You are the final technical design review reporter for AegisFlow.',
+      `You are the final technical design review reporter for "${projectLabel}".`,
       'Write a user-facing technical design review report in markdown.',
       'Use the reviewer outputs and consensus data to synthesize a concise, high-signal report.',
       'Do not mechanically dump every finding. Merge overlapping points and prioritize the most important issues.',
@@ -4834,6 +4855,7 @@ export class Orchestrator {
       '- Recommended Next Step',
       '- Reviewer Breakdown',
       '- Revised Design Output',
+      ...this.buildProjectScopeGuardrails(projectLabel),
       '',
       `Original technical design:\n${designContent}`,
       '',
@@ -5307,6 +5329,35 @@ export class Orchestrator {
       return 'codex';
     }
     return 'claude';
+  }
+
+  private inferTargetProjectLabel(targetFilePath?: string): string {
+    const candidates = [
+      targetFilePath ? path.basename(path.dirname(targetFilePath)) : '',
+      path.basename(this.store.getWorkspaceDir()),
+    ]
+      .map(candidate => candidate.trim())
+      .filter(Boolean);
+
+    for (const candidate of candidates) {
+      const normalized = candidate
+        .replace(/\.(md|markdown|txt)$/i, '')
+        .replace(/[-_]+/g, ' ')
+        .trim();
+
+      if (normalized && !/^(archive|artifacts?|design|prd|docs?|workspace|sessions?)$/i.test(normalized)) {
+        return normalized;
+      }
+    }
+
+    return 'the target system';
+  }
+
+  private buildProjectScopeGuardrails(projectLabel: string): string[] {
+    return [
+      `Keep the content scoped to the user's project "${projectLabel}".`,
+      'Do not rename the project to AegisFlow or inject AegisFlow-specific framework/process concepts unless the supplied PRD or source document explicitly requires them.',
+    ];
   }
 
   private applyResponseLanguage(prompt: string, mode: 'text' | 'json'): string {
