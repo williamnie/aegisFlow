@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## 1.0.4 - 2026-03-18
+
+- Harden prompt generation across idea intake, requirement validation, technical design, review, roundtable, PRD revision, and integration review so user-facing artifacts stay scoped to the target project instead of leaking AegisFlow-specific workflow concepts.
+- Add project-scoping guardrails and safer target-project inference to reduce prompt contamination when running the pipeline from inside the AegisFlow repository.
+- Verify the goTorrent design flow with a clean `design-test.md` artifact and align release metadata for the new prompt-safety patch.
+
 ## 1.0.2 - 2026-03-19
 
 - Fix stage2 prompt pollution issue

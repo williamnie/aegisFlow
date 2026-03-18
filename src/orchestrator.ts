@@ -645,10 +645,11 @@ export class Orchestrator {
     this.store.saveArtifact('idea-intake.md', ChatUI.formatIdeaIntakePreview(intake.rawIdea, intake.followUps));
 
     const prompt = [
-      'You are AegisFlow\'s requirement analyst.',
+      'You are a requirement analyst helping scope the user\'s project.',
       'Turn the user input into a concise structured idea brief.',
       'Use the raw idea and the follow-up Q&A together.',
       'If information is still missing, keep assumptions explicit and put unresolved items in followUps instead of inventing facts.',
+      'Do not inject AegisFlow-specific product, workflow, or architecture assumptions unless the user explicitly asked for them.',
       'Return JSON only and keep scope realistic for an end-to-end MVP.',
       '',
       `Raw idea: ${intake.rawIdea}`,
@@ -968,8 +969,9 @@ export class Orchestrator {
         () => this.runJsonWithPreferredSlots<{ questions: IdeaFollowUpQuestion[] }>(
           this.stageSlotPreference('idea'),
           [
-            'You are AegisFlow\'s intake strategist.',
+            'You are an intake strategist helping scope the user\'s project.',
             'The user provided an initial project idea. Ask only the minimum follow-up questions needed to scope a realistic MVP.',
+            'Do not inject AegisFlow-specific product, workflow, or architecture assumptions unless the user explicitly asked for them.',
             'Return JSON only.',
             'Rules:',
             '- Return 2 to 4 questions.',
@@ -1452,10 +1454,11 @@ export class Orchestrator {
           }>(
             role.slot,
             [
-              `You are acting as ${ENGINE_LABELS[role.slot]} inside AegisFlow's requirement validation stage.`,
+              `You are acting as ${ENGINE_LABELS[role.slot]} in a requirement validation review for the user's project.`,
               `Focus: ${role.focus}`,
               'Return JSON only.',
               'Be skeptical but constructive.',
+              'Do not inject AegisFlow-specific product, workflow, or architecture assumptions unless the requirement context explicitly asks for them.',
               'If the requirement is still ambiguous, risky, or likely mismatched to the user need, set verdict=needs_clarification.',
               '',
               context,
@@ -2657,10 +2660,12 @@ export class Orchestrator {
 
     let plan: RoundtablePlan;
     try {
+      const projectLabel = this.inferTargetProjectLabel();
       const prompt = [
         'You are facilitating an engineering roundtable.',
         'Given the independent reviews, decide whether a roundtable is required and define the exact issues to debate.',
         'Return JSON only.',
+        ...this.buildProjectScopeGuardrails(projectLabel),
         '',
         `Reviews:\n${JSON.stringify(reviews, null, 2)}`,
         '',
@@ -3260,10 +3265,12 @@ export class Orchestrator {
 
     let review: IntegrationReview;
     try {
+      const projectLabel = this.inferTargetProjectLabel();
       const prompt = [
-        'You are the final integration reviewer for AegisFlow.',
+        `You are the final integration reviewer for the user's project "${projectLabel}".`,
         'Assess the completed task runs and local check results.',
         'Return JSON only.',
+        ...this.buildProjectScopeGuardrails(projectLabel),
         this.isSingleTerminalMode(strategy)
           ? `The user selected single-terminal development, so keep the review grounded in the ${strategy.singleTerminalEngine} execution path.`
           : 'The user selected multi-terminal development, so review cross-role coordination and handoff quality.',
@@ -4641,6 +4648,7 @@ export class Orchestrator {
     consensus: ConsensusSummary,
     reviews: StructuredReview[],
   ): Promise<string> {
+    const projectLabel = this.inferTargetProjectLabel(command.targetFilePath);
     const prompt = [
       'You are a senior product manager revising an existing PRD based on review feedback.',
       'Rewrite the PRD in markdown.',
@@ -4656,6 +4664,8 @@ export class Orchestrator {
       '- Keep assumptions explicit instead of inventing unsupported commitments.',
       '- Tighten goals, scope, non-goals, scenarios, requirements, risks, milestones, and acceptance criteria where needed.',
       '- If a reviewer requested clarification that still cannot be resolved from the source PRD, capture it as an assumption, scope note, risk, or explicit open question inside the revised PRD.',
+      ...this.buildProjectScopeGuardrails(projectLabel),
+      'Do not preserve AegisFlow-specific product or workflow sections unless they are truly part of the target project requirements.',
       '',
       `Original PRD:\n${prdContent}`,
       '',
@@ -5345,7 +5355,7 @@ export class Orchestrator {
         .replace(/[-_]+/g, ' ')
         .trim();
 
-      if (normalized && !/^(archive|artifacts?|design|prd|docs?|workspace|sessions?)$/i.test(normalized)) {
+      if (normalized && !/^(archive|artifacts?|design|prd|docs?|workspace|sessions?|aegis|aegisflow)$/i.test(normalized)) {
         return normalized;
       }
     }
