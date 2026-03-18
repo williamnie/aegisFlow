@@ -107,6 +107,44 @@ const IDEA_FOLLOW_UP_INTENTS = new Set([
   'other',
 ] as const);
 
+interface ReviewPrdSlashCommand {
+  name: 'reviewprd';
+  rawInput: string;
+  targetFilePath: string;
+}
+
+interface ReviewDesignSlashCommand {
+  name: 'reviewd';
+  rawInput: string;
+  targetFilePath: string;
+}
+
+type ReviewSlashCommand = ReviewPrdSlashCommand | ReviewDesignSlashCommand;
+
+type Stage0EntryInput =
+  | {
+    kind: 'idea';
+    rawIdea: string;
+  }
+  | {
+    kind: 'command';
+    command: ReviewSlashCommand;
+  };
+
+type ParsedSlashCommandResult =
+  | { kind: 'none' }
+  | { kind: 'error'; message: string }
+  | { kind: 'command'; command: ReviewSlashCommand };
+
+const SLASH_COMMAND_ALIASES = new Map<string, ReviewSlashCommand['name']>([
+  ['/reviewp', 'reviewprd'],
+  ['/reviewprd', 'reviewprd'],
+  ['/reivewprd', 'reviewprd'],
+  ['/reviewd', 'reviewd'],
+]);
+
+const FILE_REFERENCE_PATTERN = /@(?:"([^"]+)"|'([^']+)'|(\S+))/g;
+
 export type PipelineStartStage =
   | 'stage0'
   | 'stage0-requirement-gate'
@@ -357,7 +395,11 @@ export class Orchestrator {
     const startIndex = this.getStartStageIndex(startStage);
 
     if (this.shouldRunStage(startIndex, 'stage0')) {
-      await this.stage0Idea();
+      const earlyExitMessage = await this.stage0Idea();
+      if (earlyExitMessage) {
+        await ChatUI.endSession(earlyExitMessage);
+        return;
+      }
     }
     if (this.shouldRunStage(startIndex, 'stage0-requirement-gate')) {
       await this.stage0RequirementGate();
@@ -574,20 +616,31 @@ export class Orchestrator {
     ChatUI.info('Engine Availability', lines.join('\n'));
   }
 
-  private async stage0Idea() {
-    this.store.markStage('stage0-idea', 'running');
-
+  private async stage0Idea(): Promise<string | null> {
     if (this.store.exists('idea-brief.md') && this.store.exists('idea-brief.json')) {
       this.store.markStage('stage0-idea', 'completed', 'Recovered existing idea brief');
-      return;
+      return null;
     }
 
     ChatUI.stage('Stage 0', [
       '输入提供者：用户',
       this.formatSlotPreference('需求整理候选', this.stageSlotPreference('idea')),
       '输出：结构化 Idea Brief',
+      this.copy(
+        '快捷命令：输入 `/reviewp @prd.md` 或 `/reviewd @design.md` 可直接评审当前本地文档。',
+        'Shortcuts: enter `/reviewp @prd.md` or `/reviewd @design.md` to review an existing local document directly.',
+      ),
     ]);
-    const intake = await this.collectIdeaIntake();
+    const entry = await this.promptStage0Entry();
+    if (entry.kind === 'command') {
+      if (entry.command.name === 'reviewprd') {
+        return this.runReviewPrdCommand(entry.command);
+      }
+      return this.runReviewDesignCommand(entry.command);
+    }
+
+    this.store.markStage('stage0-idea', 'running');
+    const intake = await this.collectIdeaIntake(entry.rawIdea);
     this.store.saveJson('idea-intake.json', intake);
     this.store.saveArtifact('idea-intake.md', ChatUI.formatIdeaIntakePreview(intake.rawIdea, intake.followUps));
 
@@ -628,6 +681,7 @@ export class Orchestrator {
     this.store.saveJson('idea-brief.json', brief);
     this.store.saveArtifact('idea-brief.md', ConsensusEngine.renderIdeaBriefMarkdown(brief, this.config.language));
     this.store.markStage('stage0-idea', 'completed', 'Idea brief generated');
+    return null;
   }
 
   private async stage0RequirementGate() {
@@ -763,8 +817,145 @@ export class Orchestrator {
     }
   }
 
-  private async collectIdeaIntake(): Promise<IdeaIntakeAnswers> {
-    const rawIdea = await ChatUI.askIdeaSeed();
+  private async promptStage0Entry(): Promise<Stage0EntryInput> {
+    while (true) {
+      const rawInput = await ChatUI.askIdeaSeed();
+      const parsed = this.parseInitialSlashCommand(rawInput);
+
+      if (parsed.kind === 'none') {
+        return {
+          kind: 'idea',
+          rawIdea: rawInput,
+        };
+      }
+
+      if (parsed.kind === 'command') {
+        return {
+          kind: 'command',
+          command: parsed.command,
+        };
+      }
+
+      ChatUI.info('Slash Command', parsed.message);
+    }
+  }
+
+  private parseInitialSlashCommand(rawInput: string): ParsedSlashCommandResult {
+    const trimmed = rawInput.trim();
+    if (!trimmed.startsWith('/')) {
+      return { kind: 'none' };
+    }
+
+    const match = trimmed.match(/^(\/\S+)(?:\s+(.*))?$/);
+    const rawCommand = (match?.[1] || trimmed).toLowerCase();
+    const remainder = match?.[2] || '';
+    const commandName = SLASH_COMMAND_ALIASES.get(rawCommand);
+
+    if (!commandName) {
+      return {
+        kind: 'error',
+        message: this.copy(
+          `未知命令：${rawCommand}\n\n当前支持：\n- \`/reviewp @prd.md\`：直接评审本地 PRD 文件\n- \`/reviewd @design.md\`：直接评审本地技术设计文件`,
+          `Unknown command: ${rawCommand}\n\nCurrently supported:\n- \`/reviewp @prd.md\`: review a local PRD file directly\n- \`/reviewd @design.md\`: review a local technical design file directly`,
+        ),
+      };
+    }
+
+    return this.parseLocalReviewSlashCommand(commandName, trimmed, remainder);
+  }
+
+  private parseLocalReviewSlashCommand(
+    commandName: ReviewSlashCommand['name'],
+    rawInput: string,
+    remainder: string,
+  ): ParsedSlashCommandResult {
+    const fileReferences = this.extractLocalFileReferences(remainder);
+    const fileTypeLabel = commandName === 'reviewprd' ? 'PRD' : this.copy('技术设计', 'technical design');
+    const displayCommand = commandName === 'reviewprd' ? '/reviewp' : '/reviewd';
+    const example = commandName === 'reviewprd' ? '/reviewp @prd.md' : '/reviewd @design.md';
+    const quotedExample =
+      commandName === 'reviewprd'
+        ? '/reviewp @"docs/my prd.md"'
+        : '/reviewd @"docs/my design.md"';
+
+    if (fileReferences.length === 0) {
+      return {
+        kind: 'error',
+        message: this.copy(
+          `\`${displayCommand}\` 需要一个 \`@文件路径\`。\n示例：\`${example}\`\n如果路径里有空格，请写成：\`${quotedExample}\`。`,
+          `\`${displayCommand}\` requires one \`@file-path\`.\nExample: \`${example}\`\nIf the path contains spaces, use: \`${quotedExample}\`.`,
+        ),
+      };
+    }
+
+    if (fileReferences.length > 1) {
+      return {
+        kind: 'error',
+        message: this.copy(
+          `\`${displayCommand}\` 当前一次只支持评审一个文件，请只保留一个 \`@文件路径\`。`,
+          `\`${displayCommand}\` currently supports reviewing one file at a time. Please keep a single \`@file-path\`.`,
+        ),
+      };
+    }
+
+    try {
+      const targetFilePath = this.resolveLocalFileReference(fileReferences[0]);
+      const content = fs.readFileSync(targetFilePath, 'utf-8');
+      if (!content.trim()) {
+        return {
+          kind: 'error',
+          message: this.copy(
+            `目标文件是空的，无法评审：${targetFilePath}`,
+            `The target file is empty and cannot be reviewed: ${targetFilePath}`,
+          ),
+        };
+      }
+
+      return {
+        kind: 'command',
+        command: {
+          name: commandName,
+          rawInput,
+          targetFilePath,
+        } as ReviewSlashCommand,
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return {
+        kind: 'error',
+        message: this.copy(
+          `无法解析 ${fileTypeLabel} 文件引用：${message}`,
+          `Could not resolve the ${fileTypeLabel} file reference: ${message}`,
+        ),
+      };
+    }
+  }
+
+  private extractLocalFileReferences(input: string): string[] {
+    return [...input.matchAll(FILE_REFERENCE_PATTERN)]
+      .map(match => match[1] || match[2] || match[3] || '')
+      .map(item => item.trim())
+      .filter(Boolean);
+  }
+
+  private resolveLocalFileReference(fileReference: string): string {
+    const normalizedReference = fileReference.trim();
+    const resolvedPath = path.isAbsolute(normalizedReference)
+      ? path.resolve(normalizedReference)
+      : path.resolve(process.cwd(), normalizedReference);
+
+    if (!fs.existsSync(resolvedPath)) {
+      throw new Error(this.copy(`文件不存在：${resolvedPath}`, `File does not exist: ${resolvedPath}`));
+    }
+
+    if (!fs.statSync(resolvedPath).isFile()) {
+      throw new Error(this.copy(`目标不是文件：${resolvedPath}`, `Target is not a file: ${resolvedPath}`));
+    }
+
+    return resolvedPath;
+  }
+
+  private async collectIdeaIntake(rawIdea: string): Promise<IdeaIntakeAnswers> {
     let questions: IdeaFollowUpQuestion[] = [];
 
     try {
@@ -1491,6 +1682,456 @@ export class Orchestrator {
     this.store.markStage('stage1-prd', 'completed', 'PRD approved');
   }
 
+  private async runReviewPrdCommand(command: ReviewPrdSlashCommand): Promise<string> {
+    this.store.markStage('command-reviewprd', 'running');
+
+    const capturedAt = nowIso();
+    const prdContent = normalizeMarkdownDocument(fs.readFileSync(command.targetFilePath, 'utf-8'));
+    const reviewSlots = ALL_SLOTS;
+
+    this.store.saveJson('reviewprd-request.json', {
+      command: command.rawInput,
+      targetFilePath: command.targetFilePath,
+      capturedAt,
+    });
+    this.store.saveArtifact(
+      'reviewprd-source.md',
+      this.renderReviewPrdSourceMarkdown(command.targetFilePath, prdContent, capturedAt),
+    );
+
+    ChatUI.stage('PRD Review', [
+      `命令：${command.rawInput}`,
+      `目标文件：${command.targetFilePath}`,
+      `独立 Reviewer：${reviewSlots.map(slot => `${ENGINE_LABELS[slot]} (${this.describePrdReviewLens(slot)})`).join(' / ')}`,
+      `PRD 报告主写：${ENGINE_LABELS.codex}`,
+      '说明：直接评审本地现有 PRD，不会启动完整的 0-7 阶段流水线。',
+      `输出：用户可直接查看的文件会写入当前目录：${path.join(this.store.getWorkspaceDir(), 'prd-review.md')} / ${path.join(this.store.getWorkspaceDir(), 'prd-revised.md')}`,
+    ]);
+
+    const reviews = await this.runParallelPrdReviews(command, prdContent, reviewSlots);
+
+    const consensus = this.summarizePrdReviews(reviews);
+    const revisedPrd = await this.generateRevisedPrdFromReviews(command, prdContent, consensus, reviews);
+    this.store.saveArtifact('reviewprd-revised.md', revisedPrd);
+
+    const revisedPrdPath = this.store.getArtifactPath('reviewprd-revised.md');
+    const reportMarkdown = await this.generatePrdReviewReport(command, prdContent, consensus, reviews, revisedPrdPath);
+    this.store.saveJson('reviewprd-consensus.json', consensus);
+    this.store.saveArtifact('reviewprd-report.md', reportMarkdown);
+    this.store.markStage('command-reviewprd', 'completed', `Reviewed PRD: ${path.basename(command.targetFilePath)}`);
+
+    const reportPath = this.store.getArtifactPath('reviewprd-report.md');
+    ChatUI.showArtifact('PRD Review Preview', truncate(reportMarkdown, 1200), reportPath);
+    await ChatUI.inspectArtifact('PRD Review Report', reportPath);
+    ChatUI.showArtifact('Revised PRD Preview', truncate(revisedPrd, 1200), revisedPrdPath);
+    await ChatUI.inspectArtifact('Revised PRD', revisedPrdPath);
+
+    return this.copy(
+      `PRD 评审已完成。当前目录已生成：\n- ${reportPath}\n- ${revisedPrdPath}`,
+      `PRD review completed. The current workspace now contains:\n- ${reportPath}\n- ${revisedPrdPath}`,
+    );
+  }
+
+  private async runReviewDesignCommand(command: ReviewDesignSlashCommand): Promise<string> {
+    this.store.markStage('command-reviewd', 'running');
+
+    const capturedAt = nowIso();
+    const designContent = normalizeMarkdownDocument(fs.readFileSync(command.targetFilePath, 'utf-8'));
+    const reviewSlots = ALL_SLOTS;
+
+    this.store.saveJson('reviewd-request.json', {
+      command: command.rawInput,
+      targetFilePath: command.targetFilePath,
+      capturedAt,
+    });
+    this.store.saveArtifact(
+      'reviewd-source.md',
+      this.renderReviewDesignSourceMarkdown(command.targetFilePath, designContent, capturedAt),
+    );
+
+    ChatUI.stage('Design Review', [
+      `命令：${command.rawInput}`,
+      `目标文件：${command.targetFilePath}`,
+      `独立 Reviewer：${reviewSlots.map(slot => `${ENGINE_LABELS[slot]} (${this.describeDesignReviewLens(slot)})`).join(' / ')}`,
+      `Design 报告主写：${ENGINE_LABELS.codex}`,
+      '说明：直接评审本地现有技术设计，不会启动完整的 0-7 阶段流水线。',
+      `输出：用户可直接查看的文件会写入当前目录：${path.join(this.store.getWorkspaceDir(), 'design-review.md')} / ${path.join(this.store.getWorkspaceDir(), 'design-revised.md')}`,
+    ]);
+
+    const reviews = await this.runParallelDesignReviews(command, designContent, reviewSlots);
+
+    const consensus = ConsensusEngine.summarizeReviews(reviews, this.config.language);
+    const revisedDesign = await this.generateRevisedDesignFromReviews(command, designContent, consensus, reviews);
+    this.store.saveArtifact('reviewd-revised.md', revisedDesign);
+
+    const revisedDesignPath = this.store.getArtifactPath('reviewd-revised.md');
+    const reportMarkdown = await this.generateDesignReviewReport(command, designContent, consensus, reviews, revisedDesignPath);
+    this.store.saveJson('reviewd-consensus.json', consensus);
+    this.store.saveArtifact('reviewd-report.md', reportMarkdown);
+    this.store.markStage('command-reviewd', 'completed', `Reviewed design: ${path.basename(command.targetFilePath)}`);
+
+    const reportPath = this.store.getArtifactPath('reviewd-report.md');
+    ChatUI.showArtifact('Design Review Preview', truncate(reportMarkdown, 1200), reportPath);
+    await ChatUI.inspectArtifact('Design Review Report', reportPath);
+    ChatUI.showArtifact('Revised Design Preview', truncate(revisedDesign, 1200), revisedDesignPath);
+    await ChatUI.inspectArtifact('Revised Design', revisedDesignPath);
+
+    return this.copy(
+      `技术设计评审已完成。当前目录已生成：\n- ${reportPath}\n- ${revisedDesignPath}`,
+      `Technical design review completed. The current workspace now contains:\n- ${reportPath}\n- ${revisedDesignPath}`,
+    );
+  }
+
+  private async runParallelPrdReviews(
+    command: ReviewPrdSlashCommand,
+    prdContent: string,
+    reviewSlots: EngineSlot[],
+  ): Promise<StructuredReview[]> {
+    const reviewProgress: Partial<Record<EngineSlot, ReviewProgressState>> = {};
+
+    for (const slot of reviewSlots) {
+      reviewProgress[slot] = {
+        status: 'queued',
+        detail: this.copy('等待并行评审启动。', 'Waiting for the parallel review wave to start.'),
+      };
+    }
+
+    const announce = (currentAction: string) => {
+      this.announcePrdReviewProgress(command.targetFilePath, reviewSlots, reviewProgress, currentAction);
+    };
+
+    announce(
+      this.copy(
+        `准备并行启动 ${reviewSlots.length} 个 Reviewer。`,
+        `Preparing to launch ${reviewSlots.length} reviewers in parallel.`,
+      ),
+    );
+
+    this.unhealthySlots.clear();
+    try {
+      return await this.runWithLoading(
+        {
+          start: this.copy('正在并行运行 PRD 独立评审...', 'Running independent PRD reviews in parallel...'),
+          success: this.copy('PRD 独立评审已全部完成', 'All independent PRD reviews completed'),
+          failure: this.copy('并行 PRD 评审阶段异常退出', 'The parallel PRD review phase exited unexpectedly'),
+        },
+        () =>
+          Promise.all(
+            reviewSlots.map(slot =>
+              this.runPrdReviewForSlot(slot, command, prdContent, reviewProgress, announce),
+            ),
+          ),
+        {
+          heartbeatMs: 30_000,
+          onHeartbeat: elapsedMs => {
+            const activeSlots = reviewSlots.filter(slot => reviewProgress[slot]?.status === 'running');
+            const pendingSlots = reviewSlots.filter(slot => {
+              const status = reviewProgress[slot]?.status;
+              return status === 'queued' || status === 'running';
+            });
+            const activeLabel = activeSlots.length > 0 ? activeSlots.map(slot => ENGINE_LABELS[slot]).join(' / ') : this.copy('无', 'none');
+            return this.copy(
+              `并行 PRD 评审仍在进行中，已等待 ${this.formatDurationMs(elapsedMs)}。活跃 Reviewer：${activeLabel}。剩余 ${pendingSlots.length} 个。`,
+              `Parallel PRD reviews are still running (${this.formatDurationMs(elapsedMs)} elapsed). Active reviewers: ${activeLabel}. ${pendingSlots.length} remaining.`,
+            );
+          },
+        },
+      );
+    } finally {
+      this.unhealthySlots.clear();
+    }
+  }
+
+  private async runPrdReviewForSlot(
+    slot: EngineSlot,
+    command: ReviewPrdSlashCommand,
+    prdContent: string,
+    reviewProgress: Partial<Record<EngineSlot, ReviewProgressState>>,
+    announce: (currentAction: string) => void,
+  ): Promise<StructuredReview> {
+    const prompt = [
+      `You are acting as ${ENGINE_LABELS[slot]} inside AegisFlow.`,
+      `Review the PRD independently from this lens: ${this.describePrdReviewLens(slot)}.`,
+      'Treat this as a PRD review, not a technical design review.',
+      'Return JSON only.',
+      'Review criteria:',
+      '- Verify whether the problem statement, goals, scope, non-goals, user scenarios, requirements, risks, milestones, and acceptance criteria are concrete and internally consistent.',
+      '- Prefer actionable findings over generic compliments.',
+      '- Explicitly call out ambiguity, contradictory statements, unrealistic scope, missing edge cases, or weak acceptance criteria.',
+      '- If the PRD is strong enough to proceed, say that clearly in the summary and suggested decision.',
+      '',
+      `PRD file path: ${command.targetFilePath}`,
+      '',
+      `PRD content:\n${prdContent}`,
+    ].join('\n');
+
+    reviewProgress[slot] = {
+      status: 'running',
+      detail: this.copy(
+        `正在独立评审 ${path.basename(command.targetFilePath)}。`,
+        `Independently reviewing ${path.basename(command.targetFilePath)}.`,
+      ),
+    };
+    announce(
+      this.copy(
+        `${ENGINE_LABELS[slot]} 已启动独立评审。`,
+        `${ENGINE_LABELS[slot]} has started its independent review.`,
+      ),
+    );
+
+    try {
+      const result = await this.runJsonForSlot<{
+        lens: string;
+        verdict: ReviewVerdict;
+        summary: string;
+        findings: StructuredReview['findings'];
+        openQuestions: string[];
+        suggestedDecision: string;
+      }>(slot, prompt, REVIEW_SCHEMA, {
+        timeoutMs: this.config.timeouts.modelExecutionMs,
+        allowFallbackProxy: false,
+      });
+
+      ChatUI.info('PRD Review Routing', this.formatExecutionSummary('PRD Reviewer', slot, result.resolution));
+      const parsed = result.output.parsed!;
+      const review: StructuredReview = {
+        reviewer: slot,
+        reviewerLabel: ENGINE_LABELS[slot],
+        resolvedBy: result.resolution.resolvedBy,
+        proxyUsed: result.resolution.proxyUsed,
+        lens: parsed.lens || this.describePrdReviewLens(slot),
+        verdict: parsed.verdict || 'Needs Discussion',
+        summary: parsed.summary || this.copy('未提供摘要。', 'No summary provided.'),
+        findings: Array.isArray(parsed.findings) ? parsed.findings : [],
+        openQuestions: safeArray(parsed.openQuestions),
+        suggestedDecision: parsed.suggestedDecision || this.copy('建议先处理关键问题，再决定是否进入下一步。', 'Address the key findings before deciding whether to proceed.'),
+        rawOutput: result.output.stdout,
+      };
+
+      this.store.saveJson(`reviewprd-${slot}.json`, review);
+      this.store.saveArtifact(`reviewprd-${slot}.md`, ConsensusEngine.renderReviewMarkdown(review, this.config.language));
+      reviewProgress[slot] = {
+        status: 'completed',
+        detail: this.copy('独立评审已完成。', 'Independent review completed.'),
+        durationMs: result.output.durationMs,
+        resolution: result.resolution,
+      };
+      announce(
+        this.copy(
+          `${ENGINE_LABELS[slot]} 已完成独立评审。`,
+          `${ENGINE_LABELS[slot]} completed its independent review.`,
+        ),
+      );
+      return review;
+    } catch (error) {
+      this.reportModelFallback(
+        'PRD Review Routing',
+        [
+          `Review 角色：${ENGINE_LABELS[slot]}`,
+          `评审对象：${path.basename(command.targetFilePath)}`,
+          '执行结果：未完成，已写入 fallback review，建议人工补看这一视角。',
+        ].join('\n'),
+        error,
+        [
+          `Review 角色：${ENGINE_LABELS[slot]}`,
+          `评审对象：${command.targetFilePath}`,
+          `评审视角：${this.describePrdReviewLens(slot)}`,
+          '执行限制：此命令要求对应 reviewer 直连执行，不会自动切代理。',
+          `超时阈值：${this.formatDurationMs(this.config.timeouts.modelExecutionMs)}`,
+        ].join('\n'),
+      );
+      const fallbackReview = this.buildPrdReviewFallbackReview(slot, error, command.targetFilePath);
+      this.store.saveJson(`reviewprd-${slot}.json`, fallbackReview);
+      this.store.saveArtifact(`reviewprd-${slot}.md`, ConsensusEngine.renderReviewMarkdown(fallbackReview, this.config.language));
+      reviewProgress[slot] = {
+        status: 'fallback',
+        detail: this.copy('已写入 fallback review。', 'Fallback review saved.'),
+      };
+      announce(
+        this.copy(
+          `${ENGINE_LABELS[slot]} 未完成独立评审，已写入 fallback review。`,
+          `${ENGINE_LABELS[slot]} did not complete its independent review; a fallback review was saved.`,
+        ),
+      );
+      return fallbackReview;
+    }
+  }
+
+  private async runParallelDesignReviews(
+    command: ReviewDesignSlashCommand,
+    designContent: string,
+    reviewSlots: EngineSlot[],
+  ): Promise<StructuredReview[]> {
+    const reviewProgress: Partial<Record<EngineSlot, ReviewProgressState>> = {};
+
+    for (const slot of reviewSlots) {
+      reviewProgress[slot] = {
+        status: 'queued',
+        detail: this.copy('等待并行评审启动。', 'Waiting for the parallel review wave to start.'),
+      };
+    }
+
+    const announce = (currentAction: string) => {
+      this.announceDesignReviewProgress(command.targetFilePath, reviewSlots, reviewProgress, currentAction);
+    };
+
+    announce(
+      this.copy(
+        `准备并行启动 ${reviewSlots.length} 个 Reviewer。`,
+        `Preparing to launch ${reviewSlots.length} reviewers in parallel.`,
+      ),
+    );
+
+    this.unhealthySlots.clear();
+    try {
+      return await this.runWithLoading(
+        {
+          start: this.copy('正在并行运行技术设计独立评审...', 'Running independent technical design reviews in parallel...'),
+          success: this.copy('技术设计独立评审已全部完成', 'All independent technical design reviews completed'),
+          failure: this.copy('并行技术设计评审阶段异常退出', 'The parallel technical design review phase exited unexpectedly'),
+        },
+        () =>
+          Promise.all(
+            reviewSlots.map(slot =>
+              this.runDesignReviewForSlot(slot, command, designContent, reviewProgress, announce),
+            ),
+          ),
+        {
+          heartbeatMs: 30_000,
+          onHeartbeat: elapsedMs => {
+            const activeSlots = reviewSlots.filter(slot => reviewProgress[slot]?.status === 'running');
+            const pendingSlots = reviewSlots.filter(slot => {
+              const status = reviewProgress[slot]?.status;
+              return status === 'queued' || status === 'running';
+            });
+            const activeLabel = activeSlots.length > 0 ? activeSlots.map(slot => ENGINE_LABELS[slot]).join(' / ') : this.copy('无', 'none');
+            return this.copy(
+              `并行技术设计评审仍在进行中，已等待 ${this.formatDurationMs(elapsedMs)}。活跃 Reviewer：${activeLabel}。剩余 ${pendingSlots.length} 个。`,
+              `Parallel technical design reviews are still running (${this.formatDurationMs(elapsedMs)} elapsed). Active reviewers: ${activeLabel}. ${pendingSlots.length} remaining.`,
+            );
+          },
+        },
+      );
+    } finally {
+      this.unhealthySlots.clear();
+    }
+  }
+
+  private async runDesignReviewForSlot(
+    slot: EngineSlot,
+    command: ReviewDesignSlashCommand,
+    designContent: string,
+    reviewProgress: Partial<Record<EngineSlot, ReviewProgressState>>,
+    announce: (currentAction: string) => void,
+  ): Promise<StructuredReview> {
+    const prompt = [
+      `You are acting as ${ENGINE_LABELS[slot]} inside AegisFlow.`,
+      `Review the technical design independently from this lens: ${this.describeDesignReviewLens(slot)}.`,
+      'Treat this as a technical design review, not a PRD review.',
+      'Return JSON only.',
+      'Review criteria:',
+      '- Verify whether the architecture, module boundaries, interfaces, data flow, error handling, observability, rollout, risks, and test strategy are concrete and internally consistent.',
+      '- Prefer actionable findings over generic praise.',
+      '- Explicitly call out vague interfaces, unrealistic implementation assumptions, missing operational details, weak testability, or unclear migration/rollout plans.',
+      '- If the design is strong enough to proceed, say that clearly in the summary and suggested decision.',
+      '',
+      `Technical design file path: ${command.targetFilePath}`,
+      '',
+      `Technical design content:\n${designContent}`,
+    ].join('\n');
+
+    reviewProgress[slot] = {
+      status: 'running',
+      detail: this.copy(
+        `正在独立评审 ${path.basename(command.targetFilePath)}。`,
+        `Independently reviewing ${path.basename(command.targetFilePath)}.`,
+      ),
+    };
+    announce(
+      this.copy(
+        `${ENGINE_LABELS[slot]} 已启动独立评审。`,
+        `${ENGINE_LABELS[slot]} has started its independent review.`,
+      ),
+    );
+
+    try {
+      const result = await this.runJsonForSlot<{
+        lens: string;
+        verdict: ReviewVerdict;
+        summary: string;
+        findings: StructuredReview['findings'];
+        openQuestions: string[];
+        suggestedDecision: string;
+      }>(slot, prompt, REVIEW_SCHEMA, {
+        timeoutMs: this.config.timeouts.modelExecutionMs,
+        allowFallbackProxy: false,
+      });
+
+      ChatUI.info('Design Review Routing', this.formatExecutionSummary('Design Reviewer', slot, result.resolution));
+      const parsed = result.output.parsed!;
+      const review: StructuredReview = {
+        reviewer: slot,
+        reviewerLabel: ENGINE_LABELS[slot],
+        resolvedBy: result.resolution.resolvedBy,
+        proxyUsed: result.resolution.proxyUsed,
+        lens: parsed.lens || this.describeDesignReviewLens(slot),
+        verdict: parsed.verdict || 'Needs Discussion',
+        summary: parsed.summary || this.copy('未提供摘要。', 'No summary provided.'),
+        findings: Array.isArray(parsed.findings) ? parsed.findings : [],
+        openQuestions: safeArray(parsed.openQuestions),
+        suggestedDecision: parsed.suggestedDecision || this.copy('建议先处理关键问题，再决定是否进入下一步。', 'Address the key findings before deciding whether to proceed.'),
+        rawOutput: result.output.stdout,
+      };
+
+      this.store.saveJson(`reviewd-${slot}.json`, review);
+      this.store.saveArtifact(`reviewd-${slot}.md`, ConsensusEngine.renderReviewMarkdown(review, this.config.language));
+      reviewProgress[slot] = {
+        status: 'completed',
+        detail: this.copy('独立评审已完成。', 'Independent review completed.'),
+        durationMs: result.output.durationMs,
+        resolution: result.resolution,
+      };
+      announce(
+        this.copy(
+          `${ENGINE_LABELS[slot]} 已完成独立评审。`,
+          `${ENGINE_LABELS[slot]} completed its independent review.`,
+        ),
+      );
+      return review;
+    } catch (error) {
+      this.reportModelFallback(
+        'Design Review Routing',
+        [
+          `Review 角色：${ENGINE_LABELS[slot]}`,
+          `评审对象：${path.basename(command.targetFilePath)}`,
+          '执行结果：未完成，已写入 fallback review，建议人工补看这一视角。',
+        ].join('\n'),
+        error,
+        [
+          `Review 角色：${ENGINE_LABELS[slot]}`,
+          `评审对象：${command.targetFilePath}`,
+          `评审视角：${this.describeDesignReviewLens(slot)}`,
+          '执行限制：此命令要求对应 reviewer 直连执行，不会自动切代理。',
+          `超时阈值：${this.formatDurationMs(this.config.timeouts.modelExecutionMs)}`,
+        ].join('\n'),
+      );
+      const fallbackReview = this.buildDesignReviewFallbackReview(slot, error, command.targetFilePath);
+      this.store.saveJson(`reviewd-${slot}.json`, fallbackReview);
+      this.store.saveArtifact(`reviewd-${slot}.md`, ConsensusEngine.renderReviewMarkdown(fallbackReview, this.config.language));
+      reviewProgress[slot] = {
+        status: 'fallback',
+        detail: this.copy('已写入 fallback review。', 'Fallback review saved.'),
+      };
+      announce(
+        this.copy(
+          `${ENGINE_LABELS[slot]} 未完成独立评审，已写入 fallback review。`,
+          `${ENGINE_LABELS[slot]} did not complete its independent review; a fallback review was saved.`,
+        ),
+      );
+      return fallbackReview;
+    }
+  }
+
   private async stage2TechDesign() {
     this.store.markStage('stage2-tech-design', 'running');
 
@@ -1807,6 +2448,94 @@ export class Orchestrator {
     return reviews;
   }
 
+  private buildPrdReviewFallbackReview(slot: EngineSlot, error: unknown, targetFilePath: string): StructuredReview {
+    const message = error instanceof Error ? error.message : String(error);
+    const conciseMessage = truncate(message.replace(/\s+/g, ' ').trim(), 600);
+
+    return {
+      reviewer: slot,
+      reviewerLabel: ENGINE_LABELS[slot],
+      resolvedBy: slot,
+      proxyUsed: false,
+      lens: this.describePrdReviewLens(slot),
+      verdict: 'Needs Discussion',
+      summary: this.copy(
+        `${ENGINE_LABELS[slot]} 未完成对 ${path.basename(targetFilePath)} 的独立 PRD 评审。建议降低自动化置信度，并人工补看这一评审视角。`,
+        `${ENGINE_LABELS[slot]} did not complete an independent PRD review for ${path.basename(targetFilePath)}. Proceed with reduced confidence and inspect this lens manually.`,
+      ),
+      findings: [
+        {
+          title: this.copy('PRD 独立评审不可用', 'Independent PRD review unavailable'),
+          severity: 'medium',
+          confidence: 0.98,
+          details: conciseMessage || this.copy(
+            `${ENGINE_LABELS[slot]} 没有返回结构化 PRD 评审结果。`,
+            `${ENGINE_LABELS[slot]} did not return a structured PRD review.`,
+          ),
+          recommendation: this.copy(
+            '修复对应引擎问题后重新运行 `/reviewp`，或由人工从这个视角补充评审。',
+            'Re-run `/reviewp` after fixing the engine issue, or complete a manual review from this lens.',
+          ),
+        },
+      ],
+      openQuestions: [
+        this.copy(
+          `在继续进入设计或实现前，是否需要补做一次“${this.describePrdReviewLens(slot)}”视角的 PRD 评审？`,
+          `Should this PRD still be reviewed from the ${this.describePrdReviewLens(slot)} lens before moving into design or implementation?`,
+        ),
+      ],
+      suggestedDecision: this.copy(
+        '不要仅因为某个 reviewer 失败就直接否决 PRD，但应在继续推进前暴露这次缺失的评审视角。',
+        'Do not reject the PRD solely because one reviewer failed, but surface the missing review lens before moving forward.',
+      ),
+      rawOutput: conciseMessage,
+    };
+  }
+
+  private buildDesignReviewFallbackReview(slot: EngineSlot, error: unknown, targetFilePath: string): StructuredReview {
+    const message = error instanceof Error ? error.message : String(error);
+    const conciseMessage = truncate(message.replace(/\s+/g, ' ').trim(), 600);
+
+    return {
+      reviewer: slot,
+      reviewerLabel: ENGINE_LABELS[slot],
+      resolvedBy: slot,
+      proxyUsed: false,
+      lens: this.describeDesignReviewLens(slot),
+      verdict: 'Needs Discussion',
+      summary: this.copy(
+        `${ENGINE_LABELS[slot]} 未完成对 ${path.basename(targetFilePath)} 的独立技术设计评审。建议降低自动化置信度，并人工补看这一评审视角。`,
+        `${ENGINE_LABELS[slot]} did not complete an independent technical design review for ${path.basename(targetFilePath)}. Proceed with reduced confidence and inspect this lens manually.`,
+      ),
+      findings: [
+        {
+          title: this.copy('技术设计独立评审不可用', 'Independent technical design review unavailable'),
+          severity: 'medium',
+          confidence: 0.98,
+          details: conciseMessage || this.copy(
+            `${ENGINE_LABELS[slot]} 没有返回结构化技术设计评审结果。`,
+            `${ENGINE_LABELS[slot]} did not return a structured technical design review.`,
+          ),
+          recommendation: this.copy(
+            '修复对应引擎问题后重新运行 `/reviewd`，或由人工从这个视角补充评审。',
+            'Re-run `/reviewd` after fixing the engine issue, or complete a manual review from this lens.',
+          ),
+        },
+      ],
+      openQuestions: [
+        this.copy(
+          `在继续进入实现前，是否需要补做一次“${this.describeDesignReviewLens(slot)}”视角的技术设计评审？`,
+          `Should this technical design still be reviewed from the ${this.describeDesignReviewLens(slot)} lens before implementation starts?`,
+        ),
+      ],
+      suggestedDecision: this.copy(
+        '不要仅因为某个 reviewer 失败就直接否决技术设计，但应在继续推进前暴露这次缺失的评审视角。',
+        'Do not reject the technical design solely because one reviewer failed, but surface the missing review lens before moving forward.',
+      ),
+      rawOutput: conciseMessage,
+    };
+  }
+
   private buildFallbackReview(slot: EngineSlot, error: unknown): StructuredReview {
     const message = error instanceof Error ? error.message : String(error);
     const conciseMessage = truncate(message.replace(/\s+/g, ' ').trim(), 600);
@@ -2021,9 +2750,10 @@ export class Orchestrator {
             const color =
               slot === 'codex' ? chalk.cyan : slot === 'gemini' ? chalk.green : chalk.magenta;
             await ChatUI.renderRoundtableMessage(this.formatRoundtableSpeakerLabel(turn), turn.message, color);
-          }
-        }
       }
+    }
+  }
+
     } else {
       const leadTurn: RoundtableTurn = {
         round: 1,
@@ -3511,6 +4241,68 @@ export class Orchestrator {
     );
   }
 
+  private announcePrdReviewProgress(
+    targetFilePath: string,
+    reviewSlots: EngineSlot[],
+    reviewProgress: Partial<Record<EngineSlot, ReviewProgressState>>,
+    currentAction: string,
+  ): void {
+    const finishedCount = reviewSlots.filter(slot => {
+      const state = reviewProgress[slot];
+      return state?.status === 'completed' || state?.status === 'fallback' || state?.status === 'skipped';
+    }).length;
+
+    const lines = [
+      `评审对象：${path.basename(targetFilePath)}`,
+      `当前进度：${finishedCount}/${reviewSlots.length} 个 Reviewer 已结束`,
+      `当前动作：${currentAction}`,
+      '执行方式：当前版本会并行启动全部 Reviewer，再统一汇总结果。',
+      '',
+      ...reviewSlots.map(
+        (slot, index) =>
+          `- Review ${index + 1}：${ENGINE_LABELS[slot]} | ${this.describePrdReviewLens(slot)} | ${this.formatReviewProgressStatus(reviewProgress[slot])}`,
+      ),
+    ];
+
+    ChatUI.info('PRD Review Progress', lines.join('\n'));
+    this.store.markStage(
+      'command-reviewprd',
+      'running',
+      `${finishedCount}/${reviewSlots.length} PRD reviewers finished. ${currentAction}`,
+    );
+  }
+
+  private announceDesignReviewProgress(
+    targetFilePath: string,
+    reviewSlots: EngineSlot[],
+    reviewProgress: Partial<Record<EngineSlot, ReviewProgressState>>,
+    currentAction: string,
+  ): void {
+    const finishedCount = reviewSlots.filter(slot => {
+      const state = reviewProgress[slot];
+      return state?.status === 'completed' || state?.status === 'fallback' || state?.status === 'skipped';
+    }).length;
+
+    const lines = [
+      `评审对象：${path.basename(targetFilePath)}`,
+      `当前进度：${finishedCount}/${reviewSlots.length} 个 Reviewer 已结束`,
+      `当前动作：${currentAction}`,
+      '执行方式：当前版本会并行启动全部 Reviewer，再统一汇总结果。',
+      '',
+      ...reviewSlots.map(
+        (slot, index) =>
+          `- Review ${index + 1}：${ENGINE_LABELS[slot]} | ${this.describeDesignReviewLens(slot)} | ${this.formatReviewProgressStatus(reviewProgress[slot])}`,
+      ),
+    ];
+
+    ChatUI.info('Design Review Progress', lines.join('\n'));
+    this.store.markStage(
+      'command-reviewd',
+      'running',
+      `${finishedCount}/${reviewSlots.length} design reviewers finished. ${currentAction}`,
+    );
+  }
+
   private describeNextReviewAction(
     leadSlot: EngineSlot,
     reviewSlots: EngineSlot[],
@@ -3746,6 +4538,544 @@ export class Orchestrator {
     return this.copy('直接写 PRD', 'Write the PRD directly');
   }
 
+  private summarizePrdReviews(reviews: StructuredReview[]): ConsensusSummary {
+    const consensusPoints: string[] = [];
+    const unresolvedQuestions = reviews.flatMap(review => review.openQuestions).filter(Boolean);
+    const weightedFindings = reviews.flatMap(review =>
+      review.findings.map(finding => ({
+        reviewer: review.reviewerLabel,
+        title: finding.title,
+        severity: finding.severity,
+        details: finding.details,
+      })),
+    );
+
+    if (reviews.every(review => review.verdict === 'Approve')) {
+      consensusPoints.push(
+        this.copy(
+          '所有 Reviewer 都认为这份 PRD 已达到可继续推进到技术设计或实现拆解的质量线。',
+          'All reviewers agree this PRD is strong enough to move into technical design or implementation planning.',
+        ),
+      );
+    }
+
+    const conflicts =
+      reviews.some(review => review.verdict !== 'Approve') || weightedFindings.length > 0
+        ? [
+          {
+            id: 'prd-readiness',
+            question: this.copy(
+              '这份 PRD 是否已经足够清晰，可以直接进入下一阶段？',
+              'Is this PRD clear enough to move directly into the next stage?',
+            ),
+            whyItMatters: this.copy(
+              '这会决定我们是继续推进技术设计 / 开发，还是先补齐目标、范围和验收标准。',
+              'This determines whether work should continue into design/development or pause for clarifications on goals, scope, and acceptance criteria.',
+            ),
+            options: [
+              {
+                value: 'proceed',
+                label: this.copy('按当前 PRD 继续推进', 'Proceed with the current PRD'),
+                rationale: this.copy(
+                  '现有问题风险可控，或可以在后续设计阶段继续收敛。',
+                  'The current issues are manageable or can be tightened during the next design stage.',
+                ),
+              },
+              {
+                value: 'revise',
+                label: this.copy('先修订 PRD 再推进', 'Revise the PRD before proceeding'),
+                rationale: this.copy(
+                  '仍有关键不清晰项，继续推进会把问题带到后续设计或实现里。',
+                  'Critical ambiguities remain, and pushing forward would carry them into design or implementation.',
+                ),
+              },
+            ],
+          },
+        ]
+        : [];
+
+    const severityWeight = (level: 'low' | 'medium' | 'high') => {
+      if (level === 'high') {
+        return 3;
+      }
+      if (level === 'medium') {
+        return 2;
+      }
+      return 1;
+    };
+
+    const topFindings = weightedFindings
+      .sort((left, right) => severityWeight(right.severity) - severityWeight(left.severity))
+      .slice(0, 5)
+      .map(item => `${item.reviewer}: ${item.title} - ${item.details}`);
+
+    return {
+      summary:
+        topFindings.length > 0
+          ? `${this.copy('重点 PRD 关注点', 'Top PRD concerns')}:\n- ${topFindings.join('\n- ')}`
+          : this.copy('当前评审集合中未发现阻塞 PRD 推进的重大问题。', 'No major blockers were found in the current PRD review set.'),
+      consensusPoints,
+      conflicts,
+      unresolvedQuestions,
+    };
+  }
+
+  private async generateRevisedPrdFromReviews(
+    command: ReviewPrdSlashCommand,
+    prdContent: string,
+    consensus: ConsensusSummary,
+    reviews: StructuredReview[],
+  ): Promise<string> {
+    const prompt = [
+      'You are a senior product manager revising an existing PRD based on review feedback.',
+      'Rewrite the PRD in markdown.',
+      'Return a complete revised PRD only. Do not include commentary, review notes, or code fences.',
+      'Important constraints:',
+      '- Do not ask for permissions.',
+      '- Do not mention permissions, write access, sandboxing, or tool limitations.',
+      '- Do not attempt to edit or update any file yourself.',
+      '- The caller will save your exact stdout into the destination markdown file.',
+      'Goals:',
+      '- Preserve the original intent where it is valid.',
+      '- Fix ambiguity, contradictions, unrealistic scope, and weak acceptance criteria based on the review feedback.',
+      '- Keep assumptions explicit instead of inventing unsupported commitments.',
+      '- Tighten goals, scope, non-goals, scenarios, requirements, risks, milestones, and acceptance criteria where needed.',
+      '- If a reviewer requested clarification that still cannot be resolved from the source PRD, capture it as an assumption, scope note, risk, or explicit open question inside the revised PRD.',
+      '',
+      `Original PRD:\n${prdContent}`,
+      '',
+      `Consensus JSON:\n${JSON.stringify(consensus, null, 2)}`,
+      '',
+      `Reviewer outputs JSON:\n${JSON.stringify(reviews, null, 2)}`,
+    ].join('\n');
+
+    try {
+      const result = await this.runWithLoading(
+        {
+          start: this.copy('正在基于评审结果生成修订版 PRD...', 'Generating a revised PRD from the review findings...'),
+          success: this.copy('修订版 PRD 已生成', 'Revised PRD generated'),
+          failure: this.copy('修订版 PRD 生成失败，将改用本地兜底版本', 'Revised PRD generation failed; falling back to a local draft'),
+        },
+        () => this.runTextWithPreferredSlots(this.buildSlotPreference('claude', 'prd'), prompt),
+        {
+          heartbeatMs: 30_000,
+          onHeartbeat: elapsedMs => this.copy(
+            `修订版 PRD 仍在生成中，已等待 ${this.formatDurationMs(elapsedMs)}。`,
+            `The revised PRD is still being generated (${this.formatDurationMs(elapsedMs)} elapsed).`,
+          ),
+        },
+      );
+
+      ChatUI.info('PRD Revision Routing', this.formatExecutionSummary('PRD 修订主写', 'claude', result.resolution));
+      return this.ensureGeneratedDocumentOutput(
+        normalizeMarkdownDocument(result.output.stdout),
+        this.copy('修订版 PRD', 'revised PRD'),
+      );
+    } catch (error) {
+      this.reportModelFallback(
+        'PRD Revision Routing',
+        this.copy('修订版 PRD：模型执行失败，已切换为本地兜底修订稿。', 'Revised PRD: model execution failed; switching to a local fallback draft.'),
+        error,
+      );
+      return this.buildFallbackRevisedPrd(prdContent, consensus, reviews);
+    }
+  }
+
+  private async generatePrdReviewReport(
+    command: ReviewPrdSlashCommand,
+    prdContent: string,
+    consensus: ConsensusSummary,
+    reviews: StructuredReview[],
+    revisedPrdPath: string,
+  ): Promise<string> {
+    const prompt = [
+      'You are the final PRD review reporter for AegisFlow.',
+      'Write a user-facing PRD review report in markdown.',
+      'Use the reviewer outputs and consensus data to synthesize a concise, high-signal report.',
+      'Do not mechanically dump every finding. Merge overlapping points and prioritize the most important issues.',
+      'Return raw markdown only. Do not wrap the answer in triple backticks.',
+      'Important constraints:',
+      '- Do not ask for permissions.',
+      '- Do not mention permissions, write access, sandboxing, or tool limitations.',
+      '- Do not attempt to edit any file yourself.',
+      '- The caller will save your exact stdout into the destination markdown file.',
+      'Suggested sections:',
+      '- Overall Verdict',
+      '- Executive Summary',
+      '- Key Findings',
+      '- Open Questions',
+      '- Recommended Next Step',
+      '- Reviewer Breakdown',
+      '- Revised PRD Output',
+      '',
+      `Original PRD:\n${prdContent}`,
+      '',
+      `Consensus JSON:\n${JSON.stringify(consensus, null, 2)}`,
+      '',
+      `Reviewer outputs JSON:\n${JSON.stringify(reviews, null, 2)}`,
+    ].join('\n');
+
+    try {
+      const result = await this.runWithLoading(
+        {
+          start: this.copy('正在生成最终 PRD review 报告...', 'Generating the final PRD review report...'),
+          success: this.copy('PRD review 报告已生成', 'The PRD review report has been generated'),
+          failure: this.copy('PRD review 报告生成失败，将改用本地兜底报告', 'PRD review report generation failed; falling back to a local report'),
+        },
+        () => this.runTextWithPreferredSlots(this.buildSlotPreference('codex', 'prd'), prompt),
+        {
+          heartbeatMs: 30_000,
+          onHeartbeat: elapsedMs => this.copy(
+            `最终 PRD review 报告仍在生成中，已等待 ${this.formatDurationMs(elapsedMs)}。`,
+            `The final PRD review report is still being generated (${this.formatDurationMs(elapsedMs)} elapsed).`,
+          ),
+        },
+      );
+
+      ChatUI.info('PRD Report Routing', this.formatExecutionSummary('PRD Review 报告主写', 'codex', result.resolution));
+      return this.ensureGeneratedDocumentOutput(
+        normalizeMarkdownDocument(result.output.stdout),
+        this.copy('PRD review 报告', 'PRD review report'),
+      );
+    } catch (error) {
+      this.reportModelFallback(
+        'PRD Report Routing',
+        this.copy('PRD review 报告：模型执行失败，已切换为本地兜底报告。', 'PRD review report: model execution failed; switching to a local fallback report.'),
+        error,
+      );
+      return this.renderPrdReviewConsensusMarkdown(consensus, reviews, command.targetFilePath, revisedPrdPath);
+    }
+  }
+
+  private async generateRevisedDesignFromReviews(
+    command: ReviewDesignSlashCommand,
+    designContent: string,
+    consensus: ConsensusSummary,
+    reviews: StructuredReview[],
+  ): Promise<string> {
+    const prompt = [
+      'You are a principal engineer revising an existing technical design based on review feedback.',
+      'Rewrite the technical design in markdown.',
+      'Return a complete revised technical design only. Do not include commentary, review notes, or code fences.',
+      'Important constraints:',
+      '- Do not ask for permissions.',
+      '- Do not mention permissions, write access, sandboxing, or tool limitations.',
+      '- Do not attempt to edit or update any file yourself.',
+      '- The caller will save your exact stdout into the destination markdown file.',
+      'Goals:',
+      '- Preserve the original intent where it is valid.',
+      '- Fix ambiguity, contradictory decisions, weak module boundaries, missing interface definitions, insufficient operational detail, and weak testing strategy based on the review feedback.',
+      '- Keep assumptions explicit instead of inventing unsupported commitments.',
+      '- Tighten architecture, modules, data flow, failure handling, observability, rollout, risks, and validation strategy where needed.',
+      '- If a reviewer requested clarification that still cannot be resolved from the source design, capture it as an assumption, scope note, risk, or explicit open question inside the revised design.',
+      '',
+      `Original technical design:\n${designContent}`,
+      '',
+      `Consensus JSON:\n${JSON.stringify(consensus, null, 2)}`,
+      '',
+      `Reviewer outputs JSON:\n${JSON.stringify(reviews, null, 2)}`,
+    ].join('\n');
+
+    try {
+      const result = await this.runWithLoading(
+        {
+          start: this.copy('正在基于评审结果生成修订版技术设计...', 'Generating a revised technical design from the review findings...'),
+          success: this.copy('修订版技术设计已生成', 'Revised technical design generated'),
+          failure: this.copy('修订版技术设计生成失败，将改用本地兜底版本', 'Revised technical design generation failed; falling back to a local draft'),
+        },
+        () => this.runTextWithPreferredSlots(this.buildSlotPreference('claude', 'finalDesign'), prompt),
+        {
+          heartbeatMs: 30_000,
+          onHeartbeat: elapsedMs => this.copy(
+            `修订版技术设计仍在生成中，已等待 ${this.formatDurationMs(elapsedMs)}。`,
+            `The revised technical design is still being generated (${this.formatDurationMs(elapsedMs)} elapsed).`,
+          ),
+        },
+      );
+
+      ChatUI.info('Design Revision Routing', this.formatExecutionSummary('Design 修订主写', 'claude', result.resolution));
+      return this.ensureGeneratedDocumentOutput(
+        normalizeMarkdownDocument(result.output.stdout),
+        this.copy('修订版技术设计', 'revised technical design'),
+      );
+    } catch (error) {
+      this.reportModelFallback(
+        'Design Revision Routing',
+        this.copy('修订版技术设计：模型执行失败，已切换为本地兜底修订稿。', 'Revised technical design: model execution failed; switching to a local fallback draft.'),
+        error,
+      );
+      return this.buildFallbackRevisedDesign(designContent, consensus, reviews);
+    }
+  }
+
+  private async generateDesignReviewReport(
+    command: ReviewDesignSlashCommand,
+    designContent: string,
+    consensus: ConsensusSummary,
+    reviews: StructuredReview[],
+    revisedDesignPath: string,
+  ): Promise<string> {
+    const prompt = [
+      'You are the final technical design review reporter for AegisFlow.',
+      'Write a user-facing technical design review report in markdown.',
+      'Use the reviewer outputs and consensus data to synthesize a concise, high-signal report.',
+      'Do not mechanically dump every finding. Merge overlapping points and prioritize the most important issues.',
+      'Return raw markdown only. Do not wrap the answer in triple backticks.',
+      'Important constraints:',
+      '- Do not ask for permissions.',
+      '- Do not mention permissions, write access, sandboxing, or tool limitations.',
+      '- Do not attempt to edit any file yourself.',
+      '- The caller will save your exact stdout into the destination markdown file.',
+      'Suggested sections:',
+      '- Overall Verdict',
+      '- Executive Summary',
+      '- Key Findings',
+      '- Open Questions',
+      '- Recommended Next Step',
+      '- Reviewer Breakdown',
+      '- Revised Design Output',
+      '',
+      `Original technical design:\n${designContent}`,
+      '',
+      `Consensus JSON:\n${JSON.stringify(consensus, null, 2)}`,
+      '',
+      `Reviewer outputs JSON:\n${JSON.stringify(reviews, null, 2)}`,
+    ].join('\n');
+
+    try {
+      const result = await this.runWithLoading(
+        {
+          start: this.copy('正在生成最终技术设计 review 报告...', 'Generating the final technical design review report...'),
+          success: this.copy('技术设计 review 报告已生成', 'The technical design review report has been generated'),
+          failure: this.copy('技术设计 review 报告生成失败，将改用本地兜底报告', 'Technical design review report generation failed; falling back to a local report'),
+        },
+        () => this.runTextWithPreferredSlots(this.buildSlotPreference('codex', 'techDesign'), prompt),
+        {
+          heartbeatMs: 30_000,
+          onHeartbeat: elapsedMs => this.copy(
+            `最终技术设计 review 报告仍在生成中，已等待 ${this.formatDurationMs(elapsedMs)}。`,
+            `The final technical design review report is still being generated (${this.formatDurationMs(elapsedMs)} elapsed).`,
+          ),
+        },
+      );
+
+      ChatUI.info('Design Report Routing', this.formatExecutionSummary('Design Review 报告主写', 'codex', result.resolution));
+      return this.ensureGeneratedDocumentOutput(
+        normalizeMarkdownDocument(result.output.stdout),
+        this.copy('技术设计 review 报告', 'technical design review report'),
+      );
+    } catch (error) {
+      this.reportModelFallback(
+        'Design Report Routing',
+        this.copy('技术设计 review 报告：模型执行失败，已切换为本地兜底报告。', 'Technical design review report: model execution failed; switching to a local fallback report.'),
+        error,
+      );
+      return this.renderDesignReviewConsensusMarkdown(consensus, reviews, command.targetFilePath, revisedDesignPath);
+    }
+  }
+
+  private buildFallbackRevisedPrd(
+    prdContent: string,
+    consensus: ConsensusSummary,
+    reviews: StructuredReview[],
+  ): string {
+    const topFindings = reviews
+      .flatMap(review => review.findings.map(finding => `${review.reviewerLabel}: ${finding.title} - ${finding.recommendation}`))
+      .slice(0, 8);
+
+    return [
+      prdContent.trim(),
+      '',
+      `## ${this.copy('修订说明', 'Revision Notes')}`,
+      ...this.renderMarkdownList(
+        topFindings.length > 0
+          ? topFindings
+          : [this.copy('本次自动修订未拿到更多结构化问题，建议人工对照 review 报告继续收敛。', 'No additional structured issues were available for the automatic revision. Review the report manually and continue refining.')],
+        this.copy('无', 'None'),
+      ),
+      '',
+      `## ${this.copy('剩余待确认问题', 'Remaining Open Questions')}`,
+      ...this.renderMarkdownList(consensus.unresolvedQuestions, this.copy('无', 'None')),
+      '',
+    ].join('\n');
+  }
+
+  private buildFallbackRevisedDesign(
+    designContent: string,
+    consensus: ConsensusSummary,
+    reviews: StructuredReview[],
+  ): string {
+    const topFindings = reviews
+      .flatMap(review => review.findings.map(finding => `${review.reviewerLabel}: ${finding.title} - ${finding.recommendation}`))
+      .slice(0, 8);
+
+    return [
+      designContent.trim(),
+      '',
+      `## ${this.copy('修订说明', 'Revision Notes')}`,
+      ...this.renderMarkdownList(
+        topFindings.length > 0
+          ? topFindings
+          : [this.copy('本次自动修订未拿到更多结构化问题，建议人工对照 review 报告继续收敛。', 'No additional structured issues were available for the automatic revision. Review the report manually and continue refining.')],
+        this.copy('无', 'None'),
+      ),
+      '',
+      `## ${this.copy('剩余待确认问题', 'Remaining Open Questions')}`,
+      ...this.renderMarkdownList(consensus.unresolvedQuestions, this.copy('无', 'None')),
+      '',
+    ].join('\n');
+  }
+
+  private ensureGeneratedDocumentOutput(content: string, label: string): string {
+    const normalized = normalizeMarkdownDocument(content);
+    if (!normalized.trim()) {
+      throw new Error(`${label} returned empty output.`);
+    }
+
+    if (this.looksLikePermissionRequestOutput(normalized)) {
+      throw new Error(`${label} returned a permission/access request instead of the document body.`);
+    }
+
+    return normalized;
+  }
+
+  private looksLikePermissionRequestOutput(content: string): boolean {
+    const normalized = content.replace(/\s+/g, ' ').trim().toLowerCase();
+    const leadingWindow = normalized.slice(0, 400);
+    const patterns = [
+      /需要写入权限/,
+      /请授权/,
+      /授权后/,
+      /没有权限写入/,
+      /write permission/,
+      /need permission/,
+      /need write access/,
+      /need access to write/,
+      /cannot update .* file/,
+      /i need permission/,
+      /i need write access/,
+      /permission to update/,
+      /permission to write/,
+      /without permission i cannot/,
+    ];
+
+    return patterns.some(pattern => pattern.test(leadingWindow));
+  }
+
+  private renderReviewPrdSourceMarkdown(targetFilePath: string, prdContent: string, capturedAt: string): string {
+    return [
+      `# ${this.copy('PRD 评审输入快照', 'PRD Review Input Snapshot')}`,
+      '',
+      `- ${this.copy('源文件', 'Source File')}: ${targetFilePath}`,
+      `- ${this.copy('采集时间', 'Captured At')}: ${capturedAt}`,
+      '',
+      `## ${this.copy('PRD 内容', 'PRD Content')}`,
+      prdContent.trim(),
+      '',
+    ].join('\n');
+  }
+
+  private renderPrdReviewConsensusMarkdown(
+    summary: ConsensusSummary,
+    reviews: StructuredReview[],
+    targetFilePath: string,
+    revisedPrdPath?: string,
+  ): string {
+    return [
+      `# ${this.copy('PRD 评审汇总', 'PRD Review Summary')}`,
+      '',
+      `- ${this.copy('目标文件', 'Target File')}: ${targetFilePath}`,
+      `- ${this.copy('独立评审数', 'Independent Reviews')}: ${reviews.length}`,
+      revisedPrdPath ? `- ${this.copy('修订版 PRD', 'Revised PRD')}: ${revisedPrdPath}` : '',
+      '',
+      `## ${this.copy('摘要', 'Summary')}`,
+      summary.summary,
+      '',
+      `## ${this.copy('已达成共识', 'Consensus Points')}`,
+      ...this.renderMarkdownList(summary.consensusPoints, this.copy('暂无。', 'None yet.')),
+      '',
+      `## ${this.copy('建议讨论点', 'Suggested Decision Topics')}`,
+      ...(summary.conflicts.length > 0
+        ? summary.conflicts.flatMap(issue => [
+          `### ${issue.question}`,
+          issue.whyItMatters,
+          ...issue.options.map(option => `- ${option.label}: ${option.rationale}`),
+          '',
+        ])
+        : [`- ${this.copy('未发现阻塞性冲突。', 'No blocking conflicts detected.')}`, '']),
+      `## ${this.copy('未解决问题', 'Unresolved Questions')}`,
+      ...this.renderMarkdownList(summary.unresolvedQuestions, this.copy('无', 'None')),
+      '',
+      `## ${this.copy('各 Reviewer 结论', 'Reviewer Verdicts')}`,
+      ...(reviews.length > 0
+        ? reviews.flatMap(review => [
+          `### ${review.reviewerLabel}`,
+          `- ${this.copy('视角', 'Lens')}: ${review.lens}`,
+          `- ${this.copy('结论', 'Verdict')}: ${review.verdict}`,
+          `- ${this.copy('摘要', 'Summary')}: ${review.summary}`,
+          '',
+        ])
+        : [`- ${this.copy('无', 'None')}`, '']),
+    ].join('\n');
+  }
+
+  private renderReviewDesignSourceMarkdown(targetFilePath: string, designContent: string, capturedAt: string): string {
+    return [
+      `# ${this.copy('技术设计评审输入快照', 'Technical Design Review Input Snapshot')}`,
+      '',
+      `- ${this.copy('源文件', 'Source File')}: ${targetFilePath}`,
+      `- ${this.copy('采集时间', 'Captured At')}: ${capturedAt}`,
+      '',
+      `## ${this.copy('技术设计内容', 'Technical Design Content')}`,
+      designContent.trim(),
+      '',
+    ].join('\n');
+  }
+
+  private renderDesignReviewConsensusMarkdown(
+    summary: ConsensusSummary,
+    reviews: StructuredReview[],
+    targetFilePath: string,
+    revisedDesignPath?: string,
+  ): string {
+    return [
+      `# ${this.copy('技术设计评审汇总', 'Technical Design Review Summary')}`,
+      '',
+      `- ${this.copy('目标文件', 'Target File')}: ${targetFilePath}`,
+      `- ${this.copy('独立评审数', 'Independent Reviews')}: ${reviews.length}`,
+      revisedDesignPath ? `- ${this.copy('修订版技术设计', 'Revised Technical Design')}: ${revisedDesignPath}` : '',
+      '',
+      `## ${this.copy('摘要', 'Summary')}`,
+      summary.summary,
+      '',
+      `## ${this.copy('已达成共识', 'Consensus Points')}`,
+      ...this.renderMarkdownList(summary.consensusPoints, this.copy('暂无。', 'None yet.')),
+      '',
+      `## ${this.copy('建议讨论点', 'Suggested Decision Topics')}`,
+      ...(summary.conflicts.length > 0
+        ? summary.conflicts.flatMap(issue => [
+          `### ${issue.question}`,
+          issue.whyItMatters,
+          ...issue.options.map(option => `- ${option.label}: ${option.rationale}`),
+          '',
+        ])
+        : [`- ${this.copy('未发现阻塞性冲突。', 'No blocking conflicts detected.')}`, '']),
+      `## ${this.copy('未解决问题', 'Unresolved Questions')}`,
+      ...this.renderMarkdownList(summary.unresolvedQuestions, this.copy('无', 'None')),
+      '',
+      `## ${this.copy('各 Reviewer 结论', 'Reviewer Verdicts')}`,
+      ...(reviews.length > 0
+        ? reviews.flatMap(review => [
+          `### ${review.reviewerLabel}`,
+          `- ${this.copy('视角', 'Lens')}: ${review.lens}`,
+          `- ${this.copy('结论', 'Verdict')}: ${review.verdict}`,
+          `- ${this.copy('摘要', 'Summary')}: ${review.summary}`,
+          '',
+        ])
+        : [`- ${this.copy('无', 'None')}`, '']),
+    ].join('\n');
+  }
+
   private renderMarkdownList(items: string[], emptyText: string): string[] {
     return items.length > 0 ? items.map(item => `- ${item}`) : [`- ${emptyText}`];
   }
@@ -3920,6 +5250,48 @@ export class Orchestrator {
         ]
         : []),
     ].join('\n');
+  }
+
+  private describePrdReviewLens(slot: EngineSlot): string {
+    if (slot === 'claude') {
+      return this.copy(
+        '产品策略 / 范围边界 / 需求完整性',
+        'product strategy / scope boundaries / requirement completeness',
+      );
+    }
+
+    if (slot === 'codex') {
+      return this.copy(
+        '实现可行性 / 技术风险 / 验收可测试性',
+        'implementation feasibility / technical risk / testability of acceptance criteria',
+      );
+    }
+
+    return this.copy(
+      '用户价值 / 场景流畅度 / 交互期望清晰度',
+      'user value / scenario flow / clarity of interaction expectations',
+    );
+  }
+
+  private describeDesignReviewLens(slot: EngineSlot): string {
+    if (slot === 'claude') {
+      return this.copy(
+        '架构边界 / 模块拆分 / 长链路权衡',
+        'architecture boundaries / module decomposition / long-range tradeoffs',
+      );
+    }
+
+    if (slot === 'codex') {
+      return this.copy(
+        '实现路径 / 数据流 / 测试与可维护性',
+        'implementation path / data flow / testing and maintainability',
+      );
+    }
+
+    return this.copy(
+      '使用体验影响 / 交互流畅度 / 交付清晰度',
+      'UX impact / interaction flow / delivery clarity',
+    );
   }
 
   private selectDesignLead(brief: IdeaBrief): EngineSlot {

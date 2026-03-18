@@ -88,6 +88,14 @@ aegis demo-session --from strategy
 
 Default session IDs now use the last two workspace directory names plus a timestamp, for example `xiaobei-aegis-flow-2026-03-17T03-29-28-379Z`.
 
+Interactive commands:
+
+- At the first prompt, `/reviewp @prd.md` reviews an existing local PRD file directly instead of starting the full Stage 0-7 pipeline.
+- At the first prompt, `/reviewd @design.md` reviews an existing local technical design file directly instead of starting the full Stage 0-7 pipeline.
+- The `@` reference accepts relative or absolute paths. If the path contains spaces, use `/reviewp @"docs/my prd.md"` or `/reviewd @"docs/my design.md"`.
+- After the review finishes, the current workspace gets `prd-review.md` and `prd-revised.md` for direct user inspection.
+- After `/reviewd` finishes, the current workspace gets `design-review.md` and `design-revised.md` for direct user inspection.
+
 ## Workflow
 
 1. Idea intake and requirement gate

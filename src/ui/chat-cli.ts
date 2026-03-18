@@ -47,7 +47,7 @@ export class ChatUI {
   static async askIdeaSeed(): Promise<string> {
     return this.resolveTextPrompt(await p.text({
       message: '你想让 AegisFlow 帮你实现什么项目或目标？',
-      placeholder: '例如：做一个能协作生成 PRD、设计和代码的多 Agent CLI',
+      placeholder: '例如：做一个能协作生成 PRD、设计和代码的多 Agent CLI；或输入 /reviewp @prd.md 或 /reviewd @design.md',
       validate: value => (!value ? '请输入一个初始想法' : undefined),
     }));
   }

@@ -88,6 +88,14 @@ aegis demo-session --from strategy
 
 默认生成的 `session-id` 现在会带上当前工作目录的最后两级目录名，再拼上时间戳，例如 `xiaobei-aegis-flow-2026-03-17T03-29-28-379Z`。
 
+交互命令：
+
+- 在第一次输入时支持 `/reviewp @prd.md`，会直接评审当前本地已经存在的 PRD 文件，不再进入完整的 0-7 阶段流水线。
+- 在第一次输入时支持 `/reviewd @design.md`，会直接评审当前本地已经存在的技术设计文件，不再进入完整的 0-7 阶段流水线。
+- `@` 后面支持相对路径或绝对路径；如果路径中有空格，可以写成 `/reviewp @"docs/my prd.md"` 或 `/reviewd @"docs/my design.md"`。
+- 评审完成后会在当前目录生成 `prd-review.md` 和 `prd-revised.md`，供用户直接查看。
+- `/reviewd` 评审完成后会在当前目录生成 `design-review.md` 和 `design-revised.md`，供用户直接查看。
+
 ## 工作流
 
 1. 想法整理与需求闸门

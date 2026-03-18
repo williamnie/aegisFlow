@@ -542,6 +542,7 @@ class CodexExecutionStrategy implements CLIExecutionStrategy {
       '--skip-git-repo-check',
       '--color',
       'never',
+      ...(!input.allowEdits && !hasArg(this.userArgs, '-s', '--sandbox') ? ['--sandbox', 'read-only'] : []),
       ...(input.useStructuredStream && !hasArg(this.userArgs, '--json') ? ['--json'] : []),
       '-o',
       input.outputFile,
@@ -580,6 +581,15 @@ class ClaudeExecutionStrategy implements CLIExecutionStrategy {
 
   buildArgs(input: StrategyBuildArgsInput): string[] {
     const args = ['-p', ...this.userArgs];
+    if (
+      !input.allowEdits &&
+      !hasArg(this.userArgs, '--tools', '--allowedTools', '--allowed-tools', '--disallowedTools', '--disallowed-tools')
+    ) {
+      args.push('--tools', '');
+    }
+    if (!input.allowEdits && !hasArg(this.userArgs, '--permission-mode')) {
+      args.push('--permission-mode', 'dontAsk');
+    }
     if (
       input.allowEdits &&
       !hasArg(

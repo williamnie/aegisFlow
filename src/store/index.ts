@@ -8,6 +8,10 @@ import { nowIso, readJsonFile } from '../utils';
 const WORKSPACE_DOC_NAME_MAP: Record<string, string> = {
   'prd-final.md': 'prd.md',
   'tech-design-final.md': 'design.md',
+  'reviewprd-report.md': 'prd-review.md',
+  'reviewprd-revised.md': 'prd-revised.md',
+  'reviewd-report.md': 'design-review.md',
+  'reviewd-revised.md': 'design-revised.md',
 };
 
 const LEGACY_SESSION_ROOT_ARTIFACTS = new Set([
