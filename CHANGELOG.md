@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## 1.0.2 - 2026-03-19
+
+- Fix stage2 prompt pollution issue
+
+
 ## 1.0.1 - 2026-03-17
 
 - Add `aegis --sessions` to list saved sessions with their project paths and latest pipeline stages.

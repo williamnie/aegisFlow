@@ -1,6 +1,6 @@
 {
   "name": "aegisflow",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "AegisFlow multi-agent CLI orchestrator",
   "main": "dist/index.js",
   "bin": {
